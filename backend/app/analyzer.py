@@ -24,16 +24,18 @@ class RequirementAnalyzer:
         branch: str | None = None,
         repo_context: str = "",
     ) -> BrdAnalyzeResponse:
-        if self._llm_configured():
-            try:
-                return await self._llm_analyze(
-                    brd_text, brd_url, brd_text_status, source, ticket_context, repo_id, branch, repo_context
-                )
-            except Exception:
-                pass
+        if self._llm_requested():
+            if not self._llm_configured():
+                raise ValueError("LLM Gateway is selected but TRACEFIX_LLM_API_KEY or TRACEFIX_LLM_MODEL is missing.")
+            return await self._llm_analyze(
+                brd_text, brd_url, brd_text_status, source, ticket_context, repo_id, branch, repo_context
+            )
         return self._heuristic_analyze(
             brd_text, brd_url, brd_text_status, source, ticket_context, repo_id, branch, repo_context
         )
+
+    def _llm_requested(self) -> bool:
+        return self.settings.llm_provider != "none" or bool(self.settings.llm_base_url or self.settings.llm_model)
 
     def _llm_configured(self) -> bool:
         return (
@@ -54,7 +56,7 @@ class RequirementAnalyzer:
         repo_context: str,
     ) -> BrdAnalyzeResponse:
         prompt = f"""
-{self.settings.system_prompt}
+Analyze the selected BRD as TraceFix AI's requirement-analysis agent.
 
 Return only valid JSON with these keys:
 summary: string[] (3-5 short crisp bullet points, each under 14 words)
@@ -81,32 +83,44 @@ BRD:
             content = await self._call_gemini(prompt)
         else:
             content = await self._call_openai_compatible(prompt)
-        payload = self._parse_json(content)
+        try:
+            payload = self._parse_json(content)
+        except Exception:
+            payload = self._parse_json(await self._repair_json(content))
         requirements = [
             Requirement(
-                id=item.get("id") or f"REQ-{idx:03d}",
-                title=item.get("title") or f"Requirement {idx}",
-                summary=item.get("summary") or "",
-                current_behavior=item.get("current_behavior") or "Not specified",
-                expected_behavior=item.get("expected_behavior") or item.get("summary") or "",
-                acceptance_criteria=item.get("acceptance_criteria") or [],
-                open_questions=item.get("open_questions") or [],
+                id=self._as_text(item.get("id")) or f"REQ-{idx:03d}",
+                title=self._as_text(item.get("title")) or f"Requirement {idx}",
+                summary=self._as_text(item.get("summary")),
+                current_behavior=self._as_text(item.get("current_behavior")) or "Not specified",
+                expected_behavior=self._as_text(item.get("expected_behavior")) or self._as_text(item.get("summary")),
+                acceptance_criteria=self._as_list(item.get("acceptance_criteria")),
+                open_questions=self._as_list(item.get("open_questions")),
             )
             for idx, item in enumerate(payload.get("requirements", []), start=1)
+            if isinstance(item, dict)
         ]
         return BrdAnalyzeResponse(
             source=source,  # type: ignore[arg-type]
             brd_url=brd_url,
             brd_text_status=brd_text_status,
-            summary=payload.get("summary") or [],
+            summary=self._as_list(payload.get("summary")),
             requirements=requirements,
-            current_behavior=payload.get("current_behavior") or [],
-            expected_behavior=payload.get("expected_behavior") or [],
-            current_flow=payload.get("current_flow") or [],
-            expected_flow=payload.get("expected_flow") or [],
-            open_questions=payload.get("open_questions") or [],
-            acceptance_criteria=payload.get("acceptance_criteria") or [],
-            metadata={"analysis_engine": self.settings.llm_provider},
+            current_behavior=self._as_list(payload.get("current_behavior")),
+            expected_behavior=self._as_list(payload.get("expected_behavior")),
+            current_flow=self._as_list(payload.get("current_flow")),
+            expected_flow=self._as_list(payload.get("expected_flow")),
+            open_questions=self._as_list(payload.get("open_questions")),
+            acceptance_criteria=self._as_list(payload.get("acceptance_criteria")),
+            metadata={
+                "analysis_engine": "llm",
+                "llm_provider": self.settings.llm_provider,
+                "llm_model": self.settings.llm_model,
+                "ticket_context_available": bool(ticket_context),
+                "repo_context_available": bool(repo_context),
+                "repo_id": repo_id,
+                "branch": branch,
+            },
         )
 
     async def _call_gemini(self, prompt: str) -> str:
@@ -127,18 +141,45 @@ BRD:
     async def _call_openai_compatible(self, prompt: str) -> str:
         base_url = self.settings.llm_base_url or "https://imllm.intermesh.net/v1"
         url = base_url.rstrip("/") + "/chat/completions"
-        async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
-                json={
-                    "model": self.settings.llm_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2,
-                },
-            )
-            response.raise_for_status()
+        timeout = httpx.Timeout(180.0, connect=20.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
+                    json={
+                        "model": self.settings.llm_model,
+                        "messages": [
+                            {"role": "system", "content": self.settings.system_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 5000,
+                        "response_format": {"type": "json_object"},
+                    },
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                body = exc.response.text[:500] if exc.response is not None else ""
+                raise ValueError(
+                    f"Gateway returned HTTP {exc.response.status_code} for model {self.settings.llm_model}: {body}"
+                ) from exc
+            except httpx.TimeoutException as exc:
+                raise ValueError(f"Gateway timed out for model {self.settings.llm_model}") from exc
+            except httpx.RequestError as exc:
+                raise ValueError(f"Gateway request failed for model {self.settings.llm_model}: {exc}") from exc
         return response.json()["choices"][0]["message"]["content"]
+
+    async def _repair_json(self, content: str) -> str:
+        prompt = f"""
+Convert this response into valid JSON only. Keep the same schema and data.
+
+Response:
+{content[:12000]}
+"""
+        if self.settings.llm_provider == "gemini":
+            return await self._call_gemini(prompt)
+        return await self._call_openai_compatible(prompt)
 
     def _parse_json(self, content: str) -> dict[str, Any]:
         try:
@@ -148,6 +189,23 @@ BRD:
             if not match:
                 raise
             return json.loads(match.group(0))
+
+    def _as_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            return " ".join(self._as_text(item) for item in value if self._as_text(item)).strip()
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value).strip()
+
+    def _as_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [text for item in value if (text := self._as_text(item))]
+        text = self._as_text(value)
+        return [text] if text else []
 
     def _heuristic_analyze(
         self,

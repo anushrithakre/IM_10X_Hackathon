@@ -219,18 +219,21 @@ async def analyze_brd(request: BrdAnalyzeRequest):
         except Exception:
             if not request.ticket_id:
                 raise
-    return await RequirementAnalyzer(settings).analyze(
-        brd_text=brd_text,
-        brd_url=brd_reference,
-        brd_text_status=brd_status,
-        source=source,
-        ticket_context=ticket_context,
-        repo_id=request.repo_id,
-        branch=request.branch,
-        repo_context=await ScmClient(settings, store.mock_fallback_enabled).fetch_repository_context(
-            request.repo_id, request.branch
-        ),
-    )
+    try:
+        return await RequirementAnalyzer(settings).analyze(
+            brd_text=brd_text,
+            brd_url=brd_reference,
+            brd_text_status=brd_status,
+            source=source,
+            ticket_context=ticket_context,
+            repo_id=request.repo_id,
+            branch=request.branch,
+            repo_context=await ScmClient(settings, store.mock_fallback_enabled).fetch_repository_context(
+                request.repo_id, request.branch
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to analyze BRD through LLM Gateway: {exc}") from exc
 
 
 @app.post("/api/test-cases/generate")

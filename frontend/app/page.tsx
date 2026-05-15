@@ -799,12 +799,20 @@ function EmptyState({ text }: { text: string }) {
 }
 
 function AnalysisPanel({ analysis }: { analysis: Analysis }) {
+  const analysisEngine = analysis.metadata?.analysis_engine;
+  const llmModel = analysis.metadata?.llm_model;
   return (
     <section className="analysis">
       <div className="analysisHeader">
         <div>
           <p className="eyebrow">BRD Analysis</p>
           <h2>Requirement Summary</h2>
+          {analysisEngine ? (
+            <p className="tcEngine">
+              Analyzed by {analysisEngine === "llm" ? "LLM Gateway" : "local heuristic"}
+              {typeof llmModel === "string" && llmModel ? ` · ${llmModel}` : ""}
+            </p>
+          ) : null}
         </div>
         <Tag>{analysis.source}</Tag>
       </div>
