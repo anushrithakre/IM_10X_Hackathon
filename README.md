@@ -2,7 +2,7 @@
 
 Milestone 1 implementation for the Intelligent QA + RCA agent:
 
-- Settings dashboard for OpenProject, SCM, and Google tokens only.
+- Settings dashboard for OpenProject/SCM tokens and Google OAuth.
 - Workbench to search/select open tickets assigned to the token user.
 - BRD link extraction from selected ticket.
 - Repository and branch selection.
@@ -39,3 +39,9 @@ Open `http://localhost:3000`.
 - The SCM adapter uses GitLab-compatible APIs under `/api/v4`.
 - The Project adapter uses OpenProject-compatible work package APIs under `/api/v3`.
 - Project and SCM base URLs are fixed by default to `https://project.intermesh.net` and `https://scm.intermesh.net`.
+- For Google OAuth, add the exact redirect URI shown on the Settings page to Google Cloud Console.
+- Save Google Client ID and Client Secret in Settings, then click `Connect Google`.
+- For LLM Gateway, set `TRACEFIX_LLM_PROVIDER=custom`, `TRACEFIX_LLM_BASE_URL=https://imllm.intermesh.net/v1`,
+  `TRACEFIX_LLM_MODEL=openrouter/anthropic/claude-sonnet-4.6`, and `TRACEFIX_LLM_API_KEY=<access-key>` in `backend/.env`.
+- Repository context is fetched by the backend through GitLab-compatible SCM APIs using the saved SCM token. The LLM
+  does not access GitLab directly; it receives BRD/ticket context plus selected repository snippets prepared by the backend.

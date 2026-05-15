@@ -32,6 +32,13 @@ MOCK_TICKETS = [
             f"BRD: {MOCK_BRD_URL}"
         ),
         brd_links=[MOCK_BRD_URL],
+        brd_attachments=[
+            {
+                "filename": "TraceFix-BRD.txt",
+                "href": "mock://tracefix-brd",
+                "download_url": "mock://tracefix-brd",
+            }
+        ],
     ),
     Ticket(
         id="OP-1843",

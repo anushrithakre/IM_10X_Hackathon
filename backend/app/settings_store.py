@@ -16,8 +16,14 @@ load_dotenv()
 SENSITIVE_FIELDS = {
     "project_token",
     "scm_token",
+    "google_client_secret",
     "google_token",
+    "google_refresh_token",
+    "google_oauth_state",
+    "llm_api_key",
 }
+
+PRESERVE_EMPTY_FIELDS = {"google_client_id"}
 
 
 class SettingsStore:
@@ -55,6 +61,9 @@ class SettingsStore:
     def save(self, settings: AppSettings) -> None:
         payload = settings.model_dump()
         existing = self._raw_payload()
+        for key in PRESERVE_EMPTY_FIELDS:
+            if not payload.get(key) and existing.get(key):
+                payload[key] = existing[key]
         for key in SENSITIVE_FIELDS:
             if not payload.get(key) and existing.get(key):
                 payload[key] = existing[key]
@@ -73,10 +82,24 @@ class SettingsStore:
     def load(self) -> AppSettings:
         payload = self._raw_payload()
         if not payload:
-            return AppSettings()
+            return AppSettings(**self._with_env_defaults({}))
         for key in SENSITIVE_FIELDS:
             payload[key] = self._unprotect(payload.get(key, ""))
-        return AppSettings(**payload)
+        return AppSettings(**self._with_env_defaults(payload))
+
+    def _with_env_defaults(self, values: dict) -> dict:
+        env_defaults = {
+            "llm_provider": os.getenv("TRACEFIX_LLM_PROVIDER", ""),
+            "llm_api_key": os.getenv("TRACEFIX_LLM_API_KEY", ""),
+            "llm_model": os.getenv("TRACEFIX_LLM_MODEL", ""),
+            "llm_base_url": os.getenv("TRACEFIX_LLM_BASE_URL", ""),
+        }
+        if values.get("llm_provider") not in {"gemini", "openai", "custom", "none", None, ""}:
+            values["llm_provider"] = "none"
+        for key, value in env_defaults.items():
+            if value:
+                values[key] = value
+        return values
 
     def _raw_payload(self) -> dict:
         with self._connect() as conn:
@@ -101,9 +124,21 @@ class SettingsStore:
                 token_saved=bool(settings.scm_token),
             ),
             google=ConnectionStatus(
-                configured=bool(settings.google_token),
-                mode="token",
-                token_saved=bool(settings.google_token),
+                configured=bool(settings.google_refresh_token or settings.google_token),
+                mode=(
+                    "oauth"
+                    if settings.google_client_id or settings.google_refresh_token
+                    else "token"
+                ),
+                token_saved=bool(settings.google_client_id and settings.google_client_secret),
+                redirect_uri=settings.google_redirect_uri,
+            ),
+            llm=ConnectionStatus(
+                configured=bool(settings.llm_provider != "none" and settings.llm_api_key and settings.llm_model),
+                base_url=settings.llm_base_url,
+                token_saved=bool(settings.llm_api_key),
+                provider=settings.llm_provider,
+                model=settings.llm_model,
             ),
             mock_fallback_enabled=self.mock_fallback_enabled,
         )

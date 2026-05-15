@@ -10,8 +10,13 @@ class AppSettings(BaseModel):
     project_token: str = ""
     scm_base_url: str = "https://scm.intermesh.net"
     scm_token: str = ""
-    google_auth_mode: Literal["token", "service_account", "none"] = "token"
+    google_auth_mode: Literal["oauth", "token", "service_account", "none"] = "oauth"
+    google_client_id: str = ""
+    google_client_secret: str = ""
     google_token: str = ""
+    google_refresh_token: str = ""
+    google_oauth_state: str = ""
+    google_redirect_uri: str = ""
     google_service_json: str = ""
     llm_provider: Literal["gemini", "openai", "custom", "none"] = "none"
     llm_api_key: str = ""
@@ -31,12 +36,14 @@ class ConnectionStatus(BaseModel):
     mode: str = ""
     provider: str = ""
     model: str = ""
+    redirect_uri: str = ""
 
 
 class SettingsStatus(BaseModel):
     project: ConnectionStatus
     scm: ConnectionStatus
     google: ConnectionStatus
+    llm: ConnectionStatus
     mock_fallback_enabled: bool
 
 
@@ -57,6 +64,7 @@ class Ticket(BaseModel):
     updated_at: str = ""
     description: str = ""
     brd_links: list[str] = Field(default_factory=list)
+    brd_attachments: list[dict[str, str]] = Field(default_factory=list)
     source: Literal["live", "mock"] = "mock"
 
 
@@ -88,7 +96,7 @@ class Requirement(BaseModel):
 
 class BrdAnalyzeRequest(BaseModel):
     ticket_id: str | None = None
-    brd_url: str
+    brd_url: str = ""
     repo_id: str | None = None
     branch: str | None = None
 
@@ -101,6 +109,34 @@ class BrdAnalyzeResponse(BaseModel):
     requirements: list[Requirement]
     current_behavior: list[str]
     expected_behavior: list[str]
+    current_flow: list[str] = Field(default_factory=list)
+    expected_flow: list[str] = Field(default_factory=list)
     open_questions: list[str]
     acceptance_criteria: list[str]
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TestCase(BaseModel):
+    id: str
+    title: str
+    category: Literal["existing", "new"]
+    priority: Literal["P0", "P1", "P2"] = "P1"
+    test_type: Literal["sanity", "functional", "negative", "edge", "regression", "integration"] = "functional"
+    preconditions: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+    expected_result: str
+    coverage: str = ""
+
+
+class TestCaseGenerateRequest(BaseModel):
+    ticket_id: str | None = None
+    repo_id: str | None = None
+    branch: str | None = None
+    analysis: BrdAnalyzeResponse
+
+
+class TestCaseGenerateResponse(BaseModel):
+    summary: list[str]
+    test_cases: list[TestCase]
+    engine: Literal["llm", "rule_based"] = "rule_based"
+    model: str = ""

@@ -15,14 +15,24 @@ async function proxy(request: Request, context: RouteContext) {
   if (contentType) {
     headers.set("content-type", contentType);
   }
+  headers.set("x-tracefix-origin", incomingUrl.origin);
 
   try {
     const response = await fetch(backendUrl, {
       method: request.method,
       headers,
       body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.text(),
-      cache: "no-store"
+      cache: "no-store",
+      redirect: "manual"
     });
+
+    const location = response.headers.get("location");
+    if (location && response.status >= 300 && response.status < 400) {
+      return new Response(null, {
+        status: response.status,
+        headers: { location }
+      });
+    }
 
     return new Response(response.body, {
       status: response.status,

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import base64
 import html
+import io
 import json
 import re
 from typing import Any
 from urllib.parse import quote
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 import httpx
 
@@ -16,6 +19,25 @@ BRD_LINK_RE = re.compile(
     r"https?://(?:docs\.google\.com/document/d/[^\s)>\"]+|[^\s)>\"]*(?:brd|requirement)[^\s)>\"]*)",
     re.IGNORECASE,
 )
+BRD_ATTACHMENT_RE = re.compile(r"(brd|requirement|frd|prd|spec)", re.IGNORECASE)
+TEXT_ATTACHMENT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".html",
+    ".htm",
+    ".csv",
+    ".json",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".log",
+}
+DOCUMENT_ATTACHMENT_EXTENSIONS = {
+    *TEXT_ATTACHMENT_EXTENSIONS,
+    ".docx",
+    ".pdf",
+}
 
 
 def extract_brd_links(*values: Any) -> list[str]:
@@ -143,11 +165,16 @@ class ProjectClient:
                 comment_payload = await self._fetch_work_package_comments(client, payload, numeric_id)
             except Exception:
                 comment_payload = []
+            try:
+                attachments = await self._fetch_work_package_attachments(client, payload, numeric_id)
+            except Exception:
+                attachments = []
         ticket = self._parse_work_package(payload)
         comment_links = extract_brd_links(comment_payload)
         for link in comment_links:
             if link not in ticket.brd_links:
                 ticket.brd_links.append(link)
+        ticket.brd_attachments = self._brd_attachments(attachments)
         return ticket
 
     async def _fetch_work_package_comments(
@@ -178,6 +205,61 @@ class ProjectClient:
                 break
         return comments
 
+    async def _fetch_work_package_attachments(
+        self,
+        client: httpx.AsyncClient,
+        work_package: dict[str, Any],
+        numeric_id: str,
+    ) -> list[dict[str, Any]]:
+        attachments_href = (
+            work_package.get("_links", {}).get("attachments", {}).get("href")
+            or f"/api/v3/work_packages/{quote(numeric_id)}/attachments"
+        )
+        response = await client.get(self._api_href(attachments_href), headers=self._headers())
+        response.raise_for_status()
+        return response.json().get("_embedded", {}).get("elements", [])
+
+    async def fetch_brd_attachment_text(self, ticket_id: str) -> tuple[str, str, str]:
+        if not (self.settings.project_base_url and self.settings.project_token):
+            raise ValueError("Project token is not configured, so ticket files cannot be fetched.")
+        numeric_id = ticket_id.split("-")[-1]
+        url = self._url(f"/api/v3/work_packages/{quote(numeric_id)}")
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(url, headers=self._headers())
+            response.raise_for_status()
+            work_package = response.json()
+            attachments = await self._fetch_work_package_attachments(client, work_package, numeric_id)
+            candidates = self._brd_attachments(attachments)
+            if not candidates:
+                raise ValueError("No BRD-like text attachment found on ticket.")
+            attachment = candidates[0]
+            download_url = attachment.get("download_url") or attachment.get("href") or ""
+            if not download_url:
+                raise ValueError("BRD attachment did not include a download URL.")
+            file_response = await client.get(self._api_href(download_url), headers=self._headers())
+            file_response.raise_for_status()
+        text = self._attachment_text(attachment.get("filename", ""), file_response.content).strip()
+        if not text:
+            raise ValueError("BRD attachment was empty.")
+        return text, f"Fetched BRD from ticket attachment: {attachment.get('filename')}", "live"
+
+    async def fetch_ticket_comments_text(self, ticket_id: str) -> str:
+        if not (self.settings.project_base_url and self.settings.project_token):
+            return ""
+        numeric_id = ticket_id.split("-")[-1]
+        url = self._url(f"/api/v3/work_packages/{quote(numeric_id)}")
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(url, headers=self._headers())
+            response.raise_for_status()
+            work_package = response.json()
+            comments = await self._fetch_work_package_comments(client, work_package, numeric_id)
+        lines = []
+        for item in comments:
+            text = self._comment_text(item)
+            if text:
+                lines.append(text)
+        return "\n\n".join(lines)
+
     def _parse_work_package(self, item: dict[str, Any]) -> Ticket:
         raw_id = str(item.get("id", ""))
         title = item.get("subject") or f"Ticket {raw_id}"
@@ -206,6 +288,81 @@ class ProjectClient:
             brd_links=links,
             source="live",
         )
+
+    def _brd_attachments(self, attachments: list[dict[str, Any]]) -> list[dict[str, str]]:
+        candidates = []
+        for item in attachments:
+            filename = (
+                item.get("fileName")
+                or item.get("filename")
+                or item.get("name")
+                or item.get("title")
+                or item.get("_links", {}).get("self", {}).get("title")
+                or ""
+            )
+            href = (
+                item.get("_links", {}).get("downloadLocation", {}).get("href")
+                or item.get("_links", {}).get("download", {}).get("href")
+                or item.get("_links", {}).get("self", {}).get("href")
+                or ""
+            )
+            extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            if not href:
+                continue
+            is_supported = not extension or extension in DOCUMENT_ATTACHMENT_EXTENSIONS
+            if not is_supported and not BRD_ATTACHMENT_RE.search(filename):
+                continue
+            score = 4 if BRD_ATTACHMENT_RE.search(filename) else 1
+            if extension in DOCUMENT_ATTACHMENT_EXTENSIONS:
+                score += 2
+            candidates.append(
+                {
+                    "filename": filename or "attachment",
+                    "href": href,
+                    "download_url": href,
+                    "score": str(score),
+                }
+            )
+        return sorted(candidates, key=lambda item: item["score"], reverse=True)
+
+    def _attachment_text(self, filename: str, content: bytes) -> str:
+        extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if extension == ".docx":
+            return self._docx_text(content)
+        if extension == ".pdf":
+            return self._pdf_text(content)
+        if extension in {".html", ".htm"}:
+            return re.sub(r"<[^>]+>", " ", content.decode("utf-8", errors="replace"))
+        return content.decode("utf-8", errors="replace")
+
+    def _docx_text(self, content: bytes) -> str:
+        with ZipFile(io.BytesIO(content)) as archive:
+            xml = archive.read("word/document.xml")
+        root = ElementTree.fromstring(xml)
+        namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        paragraphs = []
+        for paragraph in root.findall(".//w:p", namespace):
+            text = "".join(node.text or "" for node in paragraph.findall(".//w:t", namespace))
+            if text.strip():
+                paragraphs.append(text)
+        return "\n".join(paragraphs)
+
+    def _pdf_text(self, content: bytes) -> str:
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:
+            raise ValueError("PDF BRD files require the pypdf package. Run pip install -r requirements.txt.") from exc
+        reader = PdfReader(io.BytesIO(content))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    def _comment_text(self, item: dict[str, Any]) -> str:
+        comment = item.get("comment") or item.get("description") or item.get("details") or ""
+        if isinstance(comment, dict):
+            text = comment.get("raw") or comment.get("html") or comment.get("format") or ""
+        else:
+            text = str(comment)
+        text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+        return " ".join(text.split())
 
     def _mock_tickets(self, query: str) -> list[Ticket]:
         assigned_to_user = [
@@ -283,6 +440,16 @@ class ScmClient:
             branches = [branch for branch in branches if query.lower() in branch.name.lower()]
         return branches
 
+    async def fetch_repository_context(self, repo_id: str | None, branch: str | None) -> str:
+        if not repo_id or not branch or not (self.settings.scm_base_url and self.settings.scm_token):
+            return ""
+        try:
+            return await self._fetch_live_repository_context(repo_id, branch)
+        except Exception:
+            if not self.allow_mock:
+                raise
+        return ""
+
     async def _list_live_repos(self, query: str) -> list[Repository]:
         url = self._url("/api/v4/projects")
         params = {"membership": "true", "simple": "true", "per_page": "50"}
@@ -336,6 +503,104 @@ class ScmClient:
             if item.get("name")
         ]
 
+    async def _fetch_live_repository_context(self, repo_id: str, branch: str) -> str:
+        tree_url = self._url(f"/api/v4/projects/{quote(repo_id, safe='')}/repository/tree")
+        params = {"recursive": "true", "per_page": "100", "ref": branch}
+        async with httpx.AsyncClient(timeout=20) as client:
+            files: list[str] = []
+            page = 1
+            while page <= 50:
+                response = await client.get(
+                    tree_url,
+                    headers=self._headers(),
+                    params={**params, "page": str(page)},
+                )
+                response.raise_for_status()
+                files.extend(
+                    item.get("path", "")
+                    for item in response.json()
+                    if item.get("type") == "blob" and item.get("path")
+                )
+                next_page = response.headers.get("X-Next-Page")
+                if not next_page:
+                    break
+                page = int(next_page)
+            selected = self._select_context_files(files)
+            search_hits = await self._search_repository_blobs(client, repo_id, branch)
+            for path in search_hits:
+                if path not in selected:
+                    selected.insert(0, path)
+            snippets = []
+            for path in selected[:12]:
+                raw_url = self._url(
+                    f"/api/v4/projects/{quote(repo_id, safe='')}/repository/files/{quote(path, safe='')}/raw"
+                )
+                file_response = await client.get(
+                    raw_url,
+                    headers=self._headers(),
+                    params={"ref": branch},
+                )
+                if file_response.status_code >= 400:
+                    continue
+                text = file_response.text.strip()
+                if text:
+                    snippets.append(f"FILE: {path}\n{text[:2500]}")
+        file_summary = "\n".join(f"- {path}" for path in selected[:25])
+        return (
+            f"Repository files scanned: {len(files)}\n"
+            f"Repository files considered:\n{file_summary}\n\n"
+            "Relevant snippets:\n"
+            + "\n\n".join(snippets)
+        )
+
+    async def _search_repository_blobs(
+        self,
+        client: httpx.AsyncClient,
+        repo_id: str,
+        branch: str,
+    ) -> list[str]:
+        paths: list[str] = []
+        for query in ("whatsapp", "template", "message", "notification", "sms", "media", "image"):
+            url = self._url(f"/api/v4/projects/{quote(repo_id, safe='')}/search")
+            response = await client.get(
+                url,
+                headers=self._headers(),
+                params={"scope": "blobs", "search": query, "ref": branch, "per_page": "20"},
+            )
+            if response.status_code >= 400:
+                continue
+            for item in response.json():
+                path = item.get("path") or item.get("filename") or ""
+                if path and path not in paths:
+                    paths.append(path)
+        return paths
+
+    def _select_context_files(self, files: list[str]) -> list[str]:
+        allowed = (".py", ".js", ".ts", ".tsx", ".java", ".go", ".php", ".rb", ".cs", ".yml", ".yaml", ".json")
+        ignored = ("/node_modules/", "/vendor/", "/dist/", "/build/", "/.next/", "/target/")
+        keywords = (
+            "whatsapp",
+            "template",
+            "notification",
+            "message",
+            "buyer",
+            "image",
+            "media",
+            "api",
+            "controller",
+            "service",
+            "route",
+        )
+        candidates = []
+        for path in files:
+            lowered = f"/{path.lower()}"
+            if not lowered.endswith(allowed) or any(part in lowered for part in ignored):
+                continue
+            score = sum(1 for keyword in keywords if keyword in lowered)
+            if score:
+                candidates.append((score, path))
+        return [path for _, path in sorted(candidates, key=lambda item: (-item[0], len(item[1])))]
+
     def _mock_repos(self, query: str) -> list[Repository]:
         if not query:
             return MOCK_REPOS
@@ -380,8 +645,9 @@ class GoogleDocClient:
             doc_id = doc_match.group(1)
             url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
         headers = {}
-        if self.settings.google_auth_mode == "token" and self.settings.google_token:
-            headers["Authorization"] = f"Bearer {self.settings.google_token}"
+        access_token = await self._access_token()
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
         async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
@@ -389,3 +655,25 @@ class GoogleDocClient:
         if not text:
             raise ValueError("BRD document was empty")
         return text, "Fetched BRD from configured Google/public document access.", "live"
+
+    async def _access_token(self) -> str:
+        if self.settings.google_token:
+            return self.settings.google_token
+        if not (
+            self.settings.google_client_id
+            and self.settings.google_client_secret
+            and self.settings.google_refresh_token
+        ):
+            return ""
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": self.settings.google_client_id,
+                    "client_secret": self.settings.google_client_secret,
+                    "refresh_token": self.settings.google_refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            )
+            response.raise_for_status()
+        return response.json().get("access_token", "")

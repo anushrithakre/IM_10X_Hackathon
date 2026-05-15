@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Query
+import os
+import secrets
+from urllib.parse import quote, urlencode
+
+import httpx
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from .analyzer import RequirementAnalyzer
 from .clients import GoogleDocClient, ProjectClient, ScmClient
-from .schemas import AppSettings, BrdAnalyzeRequest
+from .schemas import AppSettings, BrdAnalyzeRequest, TestCaseGenerateRequest
 from .settings_store import SettingsStore
+from .testcase_generator import TestCaseGenerator
 
 app = FastAPI(title="TraceFix AI API", version="0.1.0")
 app.add_middleware(
@@ -18,6 +25,29 @@ app.add_middleware(
 )
 
 store = SettingsStore()
+
+GOOGLE_SCOPES = " ".join(
+    [
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/documents.readonly",
+    ]
+)
+GOOGLE_REDIRECT_URI = os.getenv(
+    "GOOGLE_REDIRECT_URI",
+    "http://localhost:3000/api/google/oauth/callback",
+)
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+
+def _oauth_origin(request: Request) -> str:
+    origin = request.headers.get("x-tracefix-origin") or FRONTEND_URL
+    return origin.rstrip("/")
+
+
+def _google_redirect_uri(request: Request) -> str:
+    if os.getenv("GOOGLE_REDIRECT_URI"):
+        return GOOGLE_REDIRECT_URI
+    return f"{_oauth_origin(request)}/api/google/oauth/callback"
 
 
 @app.get("/api/health")
@@ -34,6 +64,66 @@ async def save_settings(settings: AppSettings) -> dict[str, str]:
 @app.get("/api/settings/status")
 async def settings_status():
     return store.status()
+
+
+@app.get("/api/google/oauth/start")
+async def google_oauth_start(request: Request):
+    settings = store.load()
+    if not settings.google_client_id or not settings.google_client_secret:
+        raise HTTPException(
+            status_code=400,
+            detail="Save Google Client ID and Client Secret before connecting Google.",
+        )
+    state = secrets.token_urlsafe(24)
+    redirect_uri = _google_redirect_uri(request)
+    settings.google_oauth_state = state
+    settings.google_redirect_uri = redirect_uri
+    store.save(settings)
+    params = {
+        "client_id": settings.google_client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": GOOGLE_SCOPES,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+    }
+    return RedirectResponse(
+        "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+    )
+
+
+@app.get("/api/google/oauth/callback")
+async def google_oauth_callback(
+    request: Request,
+    code: str = Query(default=""),
+    state: str = Query(default=""),
+    error: str = Query(default=""),
+):
+    if error:
+        return RedirectResponse(f"{_oauth_origin(request)}/?google_error={quote(error)}")
+    settings = store.load()
+    if not code or not state or state != settings.google_oauth_state:
+        raise HTTPException(status_code=400, detail="Invalid Google OAuth callback state.")
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "redirect_uri": settings.google_redirect_uri or _google_redirect_uri(request),
+                "grant_type": "authorization_code",
+            },
+        )
+        response.raise_for_status()
+    payload = response.json()
+    settings.google_auth_mode = "oauth"
+    settings.google_token = payload.get("access_token", "")
+    settings.google_refresh_token = payload.get("refresh_token") or settings.google_refresh_token
+    settings.google_oauth_state = ""
+    store.save(settings)
+    return RedirectResponse(f"{_oauth_origin(request)}/?google=connected")
 
 
 @app.get("/api/buckets")
@@ -73,29 +163,77 @@ async def list_branches(repo_id: str, query: str = Query(default="")):
 
 @app.post("/api/brd/analyze")
 async def analyze_brd(request: BrdAnalyzeRequest):
-    if not request.brd_url:
-        raise HTTPException(status_code=400, detail="BRD URL is required")
+    if not request.brd_url and not request.ticket_id:
+        raise HTTPException(status_code=400, detail="BRD URL or ticket ID is required")
 
     settings = store.load()
+    project_client = ProjectClient(settings, store.mock_fallback_enabled)
     ticket_context = ""
+    ticket = None
     if request.ticket_id:
         try:
-            ticket = await ProjectClient(settings, store.mock_fallback_enabled).get_ticket(
-                request.ticket_id
+            ticket = await project_client.get_ticket(request.ticket_id)
+            comments = await project_client.fetch_ticket_comments_text(request.ticket_id)
+            ticket_context = (
+                f"{ticket.id}: {ticket.title}\n"
+                f"Status: {ticket.status}\n"
+                f"Description:\n{ticket.description}\n\n"
+                f"Comments:\n{comments or 'No comments returned.'}"
             )
-            ticket_context = f"{ticket.id}: {ticket.title}\n{ticket.description}"
         except Exception:
             ticket_context = ""
 
-    brd_text, brd_status, source = await GoogleDocClient(
-        settings, store.mock_fallback_enabled
-    ).fetch_text(request.brd_url)
+    brd_text = ""
+    brd_status = ""
+    source = "mock"
+    brd_reference = request.brd_url
+
+    # Ticket files are the source of truth for selected tickets. Do not fall
+    # back to Google mock content when a ticket file cannot be read.
+    if request.ticket_id:
+        try:
+            brd_text, brd_status, source = await project_client.fetch_brd_attachment_text(request.ticket_id)
+            if ticket and ticket.brd_attachments:
+                brd_reference = ticket.brd_attachments[0]["filename"]
+            else:
+                brd_reference = f"{request.ticket_id} attachment"
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unable to fetch BRD from ticket files section: {exc}",
+            ) from exc
+
+    if not brd_text and request.brd_url:
+        try:
+            brd_text, brd_status, source = await GoogleDocClient(
+                settings, store.mock_fallback_enabled
+            ).fetch_text(request.brd_url)
+        except Exception:
+            if not request.ticket_id:
+                raise
     return await RequirementAnalyzer(settings).analyze(
         brd_text=brd_text,
-        brd_url=request.brd_url,
+        brd_url=brd_reference,
         brd_text_status=brd_status,
         source=source,
         ticket_context=ticket_context,
         repo_id=request.repo_id,
         branch=request.branch,
+        repo_context=await ScmClient(settings, store.mock_fallback_enabled).fetch_repository_context(
+            request.repo_id, request.branch
+        ),
     )
+
+
+@app.post("/api/test-cases/generate")
+async def generate_test_cases(request: TestCaseGenerateRequest):
+    settings = store.load()
+    try:
+        return await TestCaseGenerator(settings).generate(
+            analysis=request.analysis,
+            ticket_id=request.ticket_id,
+            repo_id=request.repo_id,
+            branch=request.branch,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to generate test cases through LLM Gateway: {exc}") from exc
