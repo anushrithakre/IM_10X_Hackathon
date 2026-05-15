@@ -198,10 +198,18 @@ async def analyze_brd(request: BrdAnalyzeRequest):
             else:
                 brd_reference = f"{request.ticket_id} attachment"
         except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unable to fetch BRD from ticket files section: {exc}",
-            ) from exc
+            if ticket_context.strip():
+                brd_text = ticket_context
+                brd_status = (
+                    "BRD attachment had no extractable text; using selected ticket description/comments."
+                )
+                source = "live"
+                brd_reference = f"{request.ticket_id} ticket description/comments"
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unable to fetch BRD from ticket files section: {exc}",
+                ) from exc
 
     if not brd_text and request.brd_url:
         try:

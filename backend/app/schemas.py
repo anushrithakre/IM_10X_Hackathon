@@ -63,6 +63,7 @@ class Ticket(BaseModel):
     bucket_id: str = ""
     updated_at: str = ""
     description: str = ""
+    comments: list[str] = Field(default_factory=list)
     brd_links: list[str] = Field(default_factory=list)
     brd_attachments: list[dict[str, str]] = Field(default_factory=list)
     source: Literal["live", "mock"] = "mock"

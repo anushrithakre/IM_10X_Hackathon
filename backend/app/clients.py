@@ -174,6 +174,12 @@ class ProjectClient:
         for link in comment_links:
             if link not in ticket.brd_links:
                 ticket.brd_links.append(link)
+        comments = []
+        for item in comment_payload:
+            text = self._comment_text(item)
+            if text:
+                comments.append(text)
+        ticket.comments = comments
         ticket.brd_attachments = self._brd_attachments(attachments)
         return ticket
 
@@ -240,7 +246,7 @@ class ProjectClient:
             file_response.raise_for_status()
         text = self._attachment_text(attachment.get("filename", ""), file_response.content).strip()
         if not text:
-            raise ValueError("BRD attachment was empty.")
+            raise ValueError("BRD attachment had no extractable text. It may be a scanned/image-only PDF.")
         return text, f"Fetched BRD from ticket attachment: {attachment.get('filename')}", "live"
 
     async def fetch_ticket_comments_text(self, ticket_id: str) -> str:
@@ -267,11 +273,11 @@ class ProjectClient:
         description_text = (
             description.get("raw")
             or description.get("html")
-            or description.get("format")
             or ""
             if isinstance(description, dict)
             else str(description)
         )
+        description_text = self._clean_markup_text(description_text)
         links = extract_brd_links(item, description_text)
         status = item.get("_links", {}).get("status", {}).get("title", "Open")
         assignee = item.get("_links", {}).get("assignee", {}).get("title", "Unassigned")
@@ -358,10 +364,13 @@ class ProjectClient:
     def _comment_text(self, item: dict[str, Any]) -> str:
         comment = item.get("comment") or item.get("description") or item.get("details") or ""
         if isinstance(comment, dict):
-            text = comment.get("raw") or comment.get("html") or comment.get("format") or ""
+            text = comment.get("raw") or comment.get("html") or ""
         else:
             text = str(comment)
-        text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+        return self._clean_markup_text(text)
+
+    def _clean_markup_text(self, text: str) -> str:
+        text = html.unescape(re.sub(r"<[^>]+>", " ", text or ""))
         return " ".join(text.split())
 
     def _mock_tickets(self, query: str) -> list[Ticket]:

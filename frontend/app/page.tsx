@@ -30,6 +30,7 @@ type Ticket = {
   assignee: string;
   updated_at: string;
   description: string;
+  comments: string[];
   brd_links: string[];
   brd_attachments: Array<{ filename: string; href: string; download_url: string }>;
   source: "live" | "mock";
@@ -488,16 +489,72 @@ function Workbench() {
           <h2>Ticket & BRD Source</h2>
         </div>
         {selectedTicket ? (
-          <div className="ticketDetail">
-            <div>
-              <p className="detailLabel">Selected ticket</p>
-              <h3>
-                {selectedTicket.id} · {selectedTicket.title}
-              </h3>
+          <div className="ticketDetailWrap">
+            <div className="ticketDetail">
+              <div>
+                <p className="detailLabel">Selected ticket</p>
+                <h3>
+                  {selectedTicket.id} · {selectedTicket.title}
+                </h3>
+                <div className="ticketMetaLine">
+                  <span>Assignee: {selectedTicket.assignee || "Unassigned"}</span>
+                  {selectedTicket.updated_at ? <span>Updated: {formatDate(selectedTicket.updated_at)}</span> : null}
+                </div>
+              </div>
+              <div className="detailMeta">
+                <Tag>{selectedTicket.status}</Tag>
+                {loading === "ticket" && <Tag>loading</Tag>}
+              </div>
             </div>
-            <div className="detailMeta">
-              <Tag>{selectedTicket.status}</Tag>
-              {loading === "ticket" && <Tag>loading</Tag>}
+
+            <div className="ticketDataGrid">
+              <section className="ticketDataBlock ticketDescriptionBlock">
+                <div className="ticketDataHeader">
+                  <span>Ticket description</span>
+                  <Tag>{selectedTicket.description?.trim() ? "loaded" : "empty"}</Tag>
+                </div>
+                <p className="ticketText">
+                  {selectedTicket.description?.trim() || "No description returned for this ticket."}
+                </p>
+              </section>
+
+              <section className="ticketDataBlock">
+                <div className="ticketDataHeader">
+                  <span>Ticket files & links</span>
+                  <Tag>{selectedTicket.brd_attachments?.length || selectedTicket.brd_links?.length ? "found" : "none"}</Tag>
+                </div>
+                {selectedTicket.brd_attachments?.length ? (
+                  <ul className="compactList">
+                    {selectedTicket.brd_attachments.map((attachment) => (
+                      <li key={`${attachment.filename}-${attachment.href}`}>{attachment.filename}</li>
+                    ))}
+                  </ul>
+                ) : selectedTicket.brd_links?.length ? (
+                  <ul className="compactList">
+                    {selectedTicket.brd_links.map((link) => (
+                      <li key={link}>{link}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="ticketText mutedText">No BRD attachment or link returned.</p>
+                )}
+              </section>
+
+              <section className="ticketDataBlock ticketCommentsBlock">
+                <div className="ticketDataHeader">
+                  <span>Comments</span>
+                  <Tag>{selectedTicket.comments?.length || 0}</Tag>
+                </div>
+                {selectedTicket.comments?.length ? (
+                  <ul className="commentList">
+                    {selectedTicket.comments.slice(0, 6).map((comment, index) => (
+                      <li key={`${index}-${comment.slice(0, 24)}`}>{comment}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="ticketText mutedText">No comments returned for this ticket.</p>
+                )}
+              </section>
             </div>
           </div>
         ) : (
@@ -552,6 +609,17 @@ function pickDefaultBranch(branches: Branch[], repoDefault: string) {
     branches[0]?.name ||
     ""
   );
+}
+
+function formatDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function SettingsPanel({

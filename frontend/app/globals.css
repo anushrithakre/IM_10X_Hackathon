@@ -350,6 +350,11 @@ h3 {
   padding-bottom: 16px;
 }
 
+.ticketDetailWrap {
+  display: grid;
+  gap: 16px;
+}
+
 .ticketDetail p {
   color: var(--muted);
   line-height: 1.55;
@@ -367,6 +372,77 @@ h3 {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+}
+
+.ticketMetaLine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  color: var(--muted);
+  font-size: 14px;
+  margin-top: 8px;
+}
+
+.ticketDataGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+  gap: 14px;
+}
+
+.ticketDataBlock {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
+  min-width: 0;
+  padding: 14px;
+}
+
+.ticketDescriptionBlock,
+.ticketCommentsBlock {
+  grid-row: span 2;
+}
+
+.ticketDataHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--ink);
+  font-weight: 800;
+  margin-bottom: 10px;
+}
+
+.ticketText {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0;
+  max-height: 150px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.mutedText {
+  color: #98a2b3;
+}
+
+.compactList,
+.commentList {
+  color: var(--muted);
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 1.45;
+  list-style-position: inside;
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 0;
+}
+
+.commentList {
+  max-height: 230px;
 }
 
 .errorBanner {
@@ -918,6 +994,7 @@ h3 {
   .flowGrid,
   .tcMetrics,
   .tcColumns,
+  .ticketDataGrid,
   .formGrid {
     grid-template-columns: 1fr;
   }
