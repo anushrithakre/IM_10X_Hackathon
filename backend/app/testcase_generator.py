@@ -237,9 +237,17 @@ Malformed JSON:
             return json.loads(content)
         except json.JSONDecodeError:
             match = re.search(r"\{.*\}", content, re.DOTALL)
-            if not match:
-                raise
-            return json.loads(match.group(0))
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+            for tail in ["", "}", "]}", "}]}", "]}]}", '"}', '"]}', '"]}]}']:
+                try:
+                    return json.loads(content + tail)
+                except Exception:
+                    continue
+            return {}
 
     def _existing_sanity_cases(self, current_flow: list[str]) -> list[TestCase]:
         return [

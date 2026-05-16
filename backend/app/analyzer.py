@@ -182,13 +182,24 @@ Response:
         return await self._call_openai_compatible(prompt)
 
     def _parse_json(self, content: str) -> dict[str, Any]:
+        content = content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.DOTALL).strip()
         try:
             return json.loads(content)
         except json.JSONDecodeError:
             match = re.search(r"\{.*\}", content, re.DOTALL)
-            if not match:
-                raise
-            return json.loads(match.group(0))
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+            for tail in ["", "}", "]}", "}]}", "]}]}", '"}', '"]}', '"]}]}']:
+                try:
+                    return json.loads(content + tail)
+                except Exception:
+                    continue
+            return {}
 
     def _as_text(self, value: Any) -> str:
         if value is None:

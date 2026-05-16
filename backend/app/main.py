@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 from urllib.parse import quote, urlencode
@@ -12,11 +13,11 @@ from fastapi.responses import RedirectResponse
 from .agent_runner import AgentRunExecutor
 from .analyzer import RequirementAnalyzer
 from .clients import GoogleDocClient, ProjectClient, ScmClient
-from .schemas import AgentRunRequest, AppSettings, BrdAnalyzeRequest, TestCaseGenerateRequest
+from .schemas import AgentRunRequest, AppSettings, BrdAnalyzeRequest, TestCase, TestCaseGenerateRequest
 from .settings_store import SettingsStore
 from .testcase_generator import TestCaseGenerator
 
-app = FastAPI(title="TraceFix AI API", version="0.1.0")
+app = FastAPI(title="Intelligent QA + RCA Agent API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -165,7 +166,10 @@ async def list_branches(repo_id: str, query: str = Query(default="")):
 @app.post("/api/agent-runs")
 async def create_agent_run(request: AgentRunRequest):
     settings = store.load()
-    return await AgentRunExecutor(settings, store).run(request)
+    executor = AgentRunExecutor(settings, store)
+    run = executor.create_run(request)
+    asyncio.create_task(executor.continue_run(request, run))
+    return run
 
 
 @app.get("/api/agent-runs")
@@ -178,6 +182,26 @@ async def get_agent_run(run_id: str):
     run = store.get_agent_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Agent run not found")
+    return run
+
+
+@app.patch("/api/agent-runs/{run_id}/test-cases")
+async def update_agent_run_test_cases(run_id: str, test_cases: list[TestCase]):
+    run = store.get_agent_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    if not run.output_json:
+        raise HTTPException(status_code=400, detail="Agent run has no generated output yet")
+    run.output_json.test_cases = test_cases
+    run.output_json.impact_metrics.generated_test_cases = len(test_cases)
+    run.output_json.impact_metrics.requirement_linked_cases = sum(1 for case in test_cases if case.requirement_evidence)
+    run.output_json.impact_metrics.code_supported_cases = sum(
+        1 for case in test_cases if case.validation_level.startswith("L2")
+    )
+    run.output_json.impact_metrics.runtime_validated_cases = sum(
+        1 for case in test_cases if case.validation_level.startswith(("L3", "L4", "L5"))
+    )
+    store.save_agent_run(run)
     return run
 
 

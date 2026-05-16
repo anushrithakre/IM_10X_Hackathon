@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 *.db
+.tracefix_cache/
 node_modules/
 .next/
 out/

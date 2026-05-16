@@ -18,13 +18,7 @@ async function proxy(request: Request, context: RouteContext) {
   headers.set("x-tracefix-origin", incomingUrl.origin);
 
   try {
-    const response = await fetch(backendUrl, {
-      method: request.method,
-      headers,
-      body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.text(),
-      cache: "no-store",
-      redirect: "manual"
-    });
+    const response = await fetchBackend(request, backendUrl, headers);
 
     const location = response.headers.get("location");
     if (location && response.status >= 300 && response.status < 400) {
@@ -40,14 +34,38 @@ async function proxy(request: Request, context: RouteContext) {
         "content-type": response.headers.get("content-type") || "application/json"
       }
     });
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown proxy error";
     return Response.json(
       {
         detail:
-          "TraceFix backend is not reachable. Start FastAPI on http://127.0.0.1:8000 or set BACKEND_API_BASE_URL."
+          `QA + RCA backend is not reachable at ${BACKEND_BASE_URL} for ${backendUrl.pathname}. ` +
+          `Start FastAPI there or set BACKEND_API_BASE_URL. ${message}`
       },
       { status: 502 }
     );
+  }
+}
+
+async function fetchBackend(request: Request, backendUrl: URL, headers: Headers) {
+  const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.text();
+  try {
+    return await fetch(backendUrl, {
+      method: request.method,
+      headers,
+      body,
+      cache: "no-store",
+      redirect: "manual"
+    });
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return fetch(backendUrl, {
+      method: request.method,
+      headers,
+      body,
+      cache: "no-store",
+      redirect: "manual"
+    });
   }
 }
 
@@ -56,5 +74,9 @@ export async function GET(request: Request, context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
+  return proxy(request, context);
+}
+
+export async function PATCH(request: Request, context: RouteContext) {
   return proxy(request, context);
 }

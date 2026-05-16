@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import io
 import json
 import re
+import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 from xml.etree import ElementTree
@@ -424,9 +427,12 @@ class ProjectClient:
 
 
 class ScmClient:
+    CACHE_TTL_SECONDS = 60 * 60 * 6
+
     def __init__(self, settings: AppSettings, allow_mock: bool) -> None:
         self.settings = settings
         self.allow_mock = allow_mock
+        self.cache_dir = Path(".tracefix_cache/scm")
 
     async def list_repos(self, query: str = "") -> list[Repository]:
         if self.settings.scm_base_url and self.settings.scm_token:
@@ -457,8 +463,13 @@ class ScmClient:
     ) -> str:
         if not repo_id or not branch or not (self.settings.scm_base_url and self.settings.scm_token):
             return ""
+        cache_key = self._cache_key("repo-context", repo_id, branch, search_terms or [])
+        if cached := self._cache_get(cache_key):
+            return cached
         try:
-            return await self._fetch_live_repository_context(repo_id, branch, search_terms or [])
+            context = await self._fetch_live_repository_context(repo_id, branch, search_terms or [])
+            self._cache_set(cache_key, context)
+            return context
         except Exception:
             if not self.allow_mock:
                 raise
@@ -480,6 +491,93 @@ class ScmClient:
             if not self.allow_mock:
                 raise
         return ""
+
+    async def fetch_impact_search_context(
+        self,
+        repo_id: str | None,
+        branch: str | None,
+        queries: list[str],
+    ) -> str:
+        if not repo_id or not branch or not queries or not (self.settings.scm_base_url and self.settings.scm_token):
+            return ""
+        cache_key = self._cache_key("impact-search", repo_id, branch, queries)
+        if cached := self._cache_get(cache_key):
+            return cached
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                hits = await self._search_repository_blob_hits(client, repo_id, branch, queries[:24])
+                if not hits:
+                    return ""
+                snippets = []
+                for hit in hits[:30]:
+                    snippet = str(hit.get("data") or "").strip()
+                    start_line = int(hit.get("startline") or hit.get("start_line") or 1)
+                    if not snippet:
+                        snippet = await self._fetch_file_window(
+                            client,
+                            repo_id,
+                            branch,
+                            str(hit.get("path") or ""),
+                            start_line,
+                        )
+                    if not snippet:
+                        continue
+                    numbered = self._numbered_snippet(snippet, start_line)
+                    symbols = self._symbols_from_text(snippet)
+                    end_line = start_line + max(len(snippet.splitlines()) - 1, 0)
+                    snippets.append(
+                        "\n".join(
+                            [
+                                f"FILE: {hit.get('path')}",
+                                f"QUERY: {hit.get('query')}",
+                                f"LINES: {start_line}-{end_line}",
+                                f"SYMBOLS: {', '.join(symbols) if symbols else 'none detected'}",
+                                numbered[:3500],
+                            ]
+                        )
+                    )
+                context = "\n\n".join(snippets)
+                self._cache_set(cache_key, context)
+                return context
+        except Exception:
+            if not self.allow_mock:
+                raise
+        return ""
+
+    def _cache_key(self, scope: str, repo_id: str, branch: str, terms: list[str]) -> str:
+        token_key = hashlib.sha256((self.settings.scm_base_url + ":" + self.settings.scm_token).encode()).hexdigest()[:16]
+        raw = json.dumps(
+            {
+                "scope": scope,
+                "token": token_key,
+                "repo_id": repo_id,
+                "branch": branch,
+                "terms": sorted(set(str(term).lower() for term in terms if str(term).strip())),
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def _cache_get(self, key: str) -> str:
+        path = self.cache_dir / f"{key}.json"
+        try:
+            payload = json.loads(path.read_text())
+            if time.time() - float(payload.get("created_at", 0)) > self.CACHE_TTL_SECONDS:
+                return ""
+            return str(payload.get("context") or "")
+        except Exception:
+            return ""
+
+    def _cache_set(self, key: str, context: str) -> None:
+        if not context:
+            return
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            (self.cache_dir / f"{key}.json").write_text(
+                json.dumps({"created_at": time.time(), "context": context})
+            )
+        except Exception:
+            return
 
     async def _list_live_repos(self, query: str) -> list[Repository]:
         url = self._url("/api/v4/projects")
@@ -537,10 +635,11 @@ class ScmClient:
     async def _fetch_live_repository_context(self, repo_id: str, branch: str, search_terms: list[str]) -> str:
         tree_url = self._url(f"/api/v4/projects/{quote(repo_id, safe='')}/repository/tree")
         params = {"recursive": "true", "per_page": "100", "ref": branch}
+        page_cap = 100
         async with httpx.AsyncClient(timeout=20) as client:
             files: list[str] = []
             page = 1
-            while page <= 50:
+            while page <= page_cap:
                 response = await client.get(
                     tree_url,
                     headers=self._headers(),
@@ -556,13 +655,10 @@ class ScmClient:
                 if not next_page:
                     break
                 page = int(next_page)
-            selected = self._select_context_files(files, search_terms)
             search_hits = await self._search_repository_blobs(client, repo_id, branch, search_terms)
-            for path in search_hits:
-                if self._is_context_file(path) and path not in selected:
-                    selected.insert(0, path)
+            selected = self._select_context_files(files, search_terms, search_hits)
             snippets = []
-            for path in selected[:12]:
+            for path in selected[:30]:
                 raw_url = self._url(
                     f"/api/v4/projects/{quote(repo_id, safe='')}/repository/files/{quote(path, safe='')}/raw"
                 )
@@ -575,12 +671,22 @@ class ScmClient:
                     continue
                 text = file_response.text.strip()
                 if text:
-                    snippets.append(f"FILE: {path}\n{text[:2500]}")
-        file_summary = "\n".join(f"- {path}" for path in selected[:25])
+                    snippets.append(f"FILE: {path}\n{text[:3500]}")
+        directory_summary = self._directory_summary(files, search_terms)
+        file_summary = "\n".join(f"- {path}" for path in selected[:50])
+        possible_truncation = (
+            f"\nRepository tree page cap reached at {page_cap * 100} blobs; deeper pages may not be listed."
+            if len(files) >= page_cap * 100
+            else ""
+        )
         return (
-            f"Repository files scanned: {len(files)}\n"
-            f"Repository files considered:\n{file_summary}\n\n"
-            "Relevant snippets:\n"
+            "Repository tree discovery:\n"
+            f"- GitLab repository/tree was called with recursive=true, so file paths are discovered at all nesting depths GitLab returns.\n"
+            f"- Blob paths discovered from recursive tree: {len(files)}.{possible_truncation}\n"
+            "- Raw file contents are NOT fetched for every discovered file; snippets are fetched only for ranked candidates/search hits.\n\n"
+            f"Relevant directories from discovered tree:\n{directory_summary}\n\n"
+            f"Candidate context files selected for prompt (top 50, not the full scan):\n{file_summary}\n\n"
+            "Raw snippets fetched for top candidates:\n"
             + "\n\n".join(snippets)
         )
 
@@ -593,7 +699,7 @@ class ScmClient:
     ) -> list[str]:
         paths: list[str] = []
         default_terms = ["whatsapp", "template", "message", "notification", "sms", "media", "image"]
-        queries = list(dict.fromkeys([*(search_terms or []), *default_terms]))[:18]
+        queries = self._expanded_queries([*(search_terms or []), *default_terms])[:30]
         for query in queries:
             url = self._url(f"/api/v4/projects/{quote(repo_id, safe='')}/search")
             response = await client.get(
@@ -609,9 +715,93 @@ class ScmClient:
                     paths.append(path)
         return paths
 
-    def _select_context_files(self, files: list[str], search_terms: list[str] | None = None) -> list[str]:
-        keywords = (
+    async def _search_repository_blob_hits(
+        self,
+        client: httpx.AsyncClient,
+        repo_id: str,
+        branch: str,
+        queries: list[str],
+    ) -> list[dict[str, Any]]:
+        hits: list[dict[str, Any]] = []
+        seen: set[tuple[str, int, str]] = set()
+        for query in self._expanded_queries(queries)[:40]:
+            url = self._url(f"/api/v4/projects/{quote(repo_id, safe='')}/search")
+            response = await client.get(
+                url,
+                headers=self._headers(),
+                params={"scope": "blobs", "search": query, "ref": branch, "per_page": "20"},
+            )
+            if response.status_code >= 400:
+                continue
+            for item in response.json():
+                path = item.get("path") or item.get("filename") or ""
+                if not path or not self._is_context_file(path):
+                    continue
+                start_line = int(item.get("startline") or item.get("start_line") or 1)
+                key = (path, start_line, query.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(
+                    {
+                        "path": path,
+                        "query": query,
+                        "data": item.get("data") or "",
+                        "startline": start_line,
+                    }
+                )
+        return hits
+
+    async def _fetch_file_window(
+        self,
+        client: httpx.AsyncClient,
+        repo_id: str,
+        branch: str,
+        path: str,
+        start_line: int,
+    ) -> str:
+        if not path:
+            return ""
+        raw_url = self._url(
+            f"/api/v4/projects/{quote(repo_id, safe='')}/repository/files/{quote(path, safe='')}/raw"
+        )
+        response = await client.get(raw_url, headers=self._headers(), params={"ref": branch})
+        if response.status_code >= 400:
+            return ""
+        lines = response.text.splitlines()
+        start = max(start_line - 4, 0)
+        end = min(start + 28, len(lines))
+        return "\n".join(lines[start:end])
+
+    def _numbered_snippet(self, snippet: str, start_line: int) -> str:
+        return "\n".join(
+            f"{line_no}: {line}"
+            for line_no, line in enumerate(snippet.splitlines(), start=max(start_line, 1))
+        )
+
+    def _symbols_from_text(self, text: str) -> list[str]:
+        patterns = [
+            r"\b(?:def|class|function|const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\b(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?[A-Za-z0-9_<>,\[\]?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            r"\bfunc\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        ]
+        symbols: list[str] = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                name = match.group(1)
+                if name not in symbols:
+                    symbols.append(name)
+        return symbols[:8]
+
+    def _select_context_files(
+        self,
+        files: list[str],
+        search_terms: list[str] | None = None,
+        search_hits: list[str] | None = None,
+    ) -> list[str]:
+        keywords = self._expanded_queries([
             "whatsapp",
+            "whatsappworker",
             "template",
             "notification",
             "message",
@@ -623,19 +813,123 @@ class ScmClient:
             "service",
             "route",
             *(search_terms or []),
-        )
+        ])
+        search_hit_paths = set(search_hits or [])
         candidates = []
         for path in files:
             if not self._is_context_file(path):
                 continue
             lowered = f"/{path.lower()}"
-            score = sum(1 for keyword in keywords if keyword in lowered)
+            filename = path.rsplit("/", 1)[-1].lower()
+            directory = path.rsplit("/", 1)[0].lower() if "/" in path else ""
+            score = 0
+            for keyword in keywords:
+                if not keyword:
+                    continue
+                keyword = keyword.lower()
+                if keyword in filename:
+                    score += 12
+                elif keyword in directory:
+                    score += 5
+                elif keyword in lowered:
+                    score += 2
+            if path in search_hit_paths:
+                score += 8
+            if "worker" in filename:
+                score += 4
+            if "whatsapp" in filename:
+                score += 20
+            if "whatsapp" in directory:
+                score += 10
             if score:
                 candidates.append((score, path))
         return [path for _, path in sorted(candidates, key=lambda item: (-item[0], len(item[1])))]
 
+    def _expanded_queries(self, queries: list[str]) -> list[str]:
+        expanded: list[str] = []
+        stop = {"the", "and", "for", "with", "from", "that", "this", "into", "case", "when", "then"}
+        for query in queries:
+            clean = str(query or "").strip()
+            if not clean:
+                continue
+            variants = [clean]
+            variants.extend(re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", clean))
+            for variant in variants:
+                lowered = variant.lower()
+                if lowered in stop or len(lowered) < 3:
+                    continue
+                if variant not in expanded:
+                    expanded.append(variant)
+        return expanded
+
+    def _directory_summary(self, files: list[str], search_terms: list[str] | None = None) -> str:
+        directories: dict[str, int] = {}
+        for path in files:
+            parts = path.split("/")[:-1]
+            for index in range(1, len(parts) + 1):
+                directory = "/".join(parts[:index])
+                directories[directory] = directories.get(directory, 0) + 1
+        keywords = [
+            "whatsapp",
+            "template",
+            "notification",
+            "message",
+            "buyer",
+            "media",
+            "image",
+            "api",
+            "controller",
+            "service",
+            "route",
+            *(search_terms or []),
+        ]
+        keyword_dirs = [
+            (count, directory)
+            for directory, count in directories.items()
+            if any(keyword.lower() in directory.lower() for keyword in keywords if keyword)
+        ]
+        top_dirs = sorted(directories.items(), key=lambda item: (-item[1], item[0]))[:20]
+        ranked = [
+            directory
+            for _, directory in sorted(keyword_dirs, key=lambda item: (-item[0], item[1]))[:40]
+        ]
+        for directory, _ in top_dirs:
+            if directory not in ranked:
+                ranked.append(directory)
+            if len(ranked) >= 60:
+                break
+        if not ranked:
+            return "- No directories discovered from repository tree."
+        return "\n".join(f"- {directory} ({directories[directory]} files)" for directory in ranked)
+
     def _is_context_file(self, path: str) -> bool:
-        allowed = (".py", ".js", ".ts", ".tsx", ".java", ".go", ".php", ".rb", ".cs", ".vb", ".aspx", ".yml", ".yaml", ".json")
+        allowed = (
+            ".py",
+            ".js",
+            ".ts",
+            ".tsx",
+            ".java",
+            ".go",
+            ".php",
+            ".rb",
+            ".cs",
+            ".vb",
+            ".aspx",
+            ".sql",
+            ".proto",
+            ".graphql",
+            ".gql",
+            ".sh",
+            ".conf",
+            ".config",
+            ".ini",
+            ".properties",
+            ".toml",
+            ".yml",
+            ".yaml",
+            ".json",
+        )
+        allowed_names = {"dockerfile", "makefile", "gemfile", "rakefile"}
         ignored = (
             "/node_modules/",
             "/vendor/",
@@ -643,7 +937,6 @@ class ScmClient:
             "/build/",
             "/.next/",
             "/target/",
-            "/packages/",
             "/bin/",
             "/obj/",
             ".min.js",
@@ -651,7 +944,8 @@ class ScmClient:
             ".lock",
         )
         lowered = f"/{path.lower()}"
-        return lowered.endswith(allowed) and not any(part in lowered for part in ignored)
+        name = path.rsplit("/", 1)[-1].lower()
+        return (lowered.endswith(allowed) or name in allowed_names) and not any(part in lowered for part in ignored)
 
     def _mock_repos(self, query: str) -> list[Repository]:
         if not query:

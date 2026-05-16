@@ -132,6 +132,14 @@ type AffectedFile = {
   reason: string;
   confidence: "high" | "medium" | "low";
   related_requirement: string;
+  suspected_module?: string;
+  confidence_score?: number;
+  matched_symbols?: string[];
+  line_range?: string;
+  evidence?: string[];
+  evidence_snippets?: string[];
+  expected_change?: string;
+  status?: "to_be_modified" | "needs_investigation";
 };
 
 type MissingDependency = {
@@ -184,6 +192,7 @@ type AgentStep = {
 
 type AgentRunOutput = {
   analysis: Analysis;
+  impact_analysis?: Record<string, unknown>;
   test_case_summary: string[];
   test_cases: TestCase[];
   affected_files: AffectedFile[];
@@ -209,6 +218,7 @@ type AgentRun = {
   started_at: string;
   completed_at: string;
   output_json: AgentRunOutput | null;
+  steps: AgentStep[];
   error: string;
 };
 
@@ -239,7 +249,7 @@ export default function Home() {
           <span className="brandIcon">
             <ShieldCheck size={28} />
           </span>
-          <span>TraceFix AI</span>
+          <span>Intelligent QA + RCA Agent</span>
         </div>
         <nav className="nav">
           <button
@@ -247,7 +257,7 @@ export default function Home() {
             onClick={() => setActiveTab("workbench")}
           >
             <ClipboardList size={20} />
-            Workbench
+            BRD Analysis
           </button>
           <button
             className={activeTab === "settings" ? "navItem active" : "navItem"}
@@ -296,6 +306,8 @@ function Workbench() {
   const [manualBrdUrl, setManualBrdUrl] = useState("");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [testCases, setTestCases] = useState<TestCase[]>([]);
+  const [testCasesDirty, setTestCasesDirty] = useState(false);
+  const [savingTestCases, setSavingTestCases] = useState(false);
   const [testCaseMeta, setTestCaseMeta] = useState<TestCaseMeta | null>(null);
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
   const [selectedAgentRun, setSelectedAgentRun] = useState<AgentRun | null>(null);
@@ -304,6 +316,10 @@ function Workbench() {
   const [editingCaseId, setEditingCaseId] = useState("");
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState("");
+
+  function clearBackendReachabilityError() {
+    setError((current) => current.startsWith("QA + RCA backend is not reachable") ? "" : current);
+  }
 
   useEffect(() => {
     loadTickets("").catch((err) => setError(err.message));
@@ -334,6 +350,16 @@ function Workbench() {
     return () => window.clearTimeout(timeout);
   }, [selectedRepo, branchQuery]);
 
+  useEffect(() => {
+    if (selectedAgentRun?.status !== "running") {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      refreshAgentRun(selectedAgentRun.run_id).catch((err) => setError(err.message));
+    }, 2500);
+    return () => window.clearInterval(interval);
+  }, [selectedAgentRun?.run_id, selectedAgentRun?.status]);
+
   const hasBrdAttachment = Boolean(selectedTicket?.brd_attachments?.length);
   const brdUrl = useMemo(
     () => manualBrdUrl.trim() || (hasBrdAttachment ? "" : selectedTicket?.brd_links?.[0] || ""),
@@ -344,12 +370,14 @@ function Workbench() {
     const response = await fetch(`${API_BASE}/api/tickets?query=${encodeURIComponent(query)}`);
     if (!response.ok) throw new Error("Unable to fetch tickets");
     setTickets(await response.json());
+    clearBackendReachabilityError();
   }
 
   async function loadRepos(query: string) {
     const response = await fetch(`${API_BASE}/api/scm/repos?query=${encodeURIComponent(query)}`);
     if (!response.ok) throw new Error("Unable to fetch repositories");
     setRepos(await response.json());
+    clearBackendReachabilityError();
   }
 
   async function loadBranches(repoId: string, query: string) {
@@ -359,6 +387,7 @@ function Workbench() {
     if (!response.ok) throw new Error("Unable to fetch branches");
     const branchList: Branch[] = await response.json();
     setBranches(branchList);
+    clearBackendReachabilityError();
     setSelectedBranch((current) => {
       if (current && branchList.some((branch) => branch.name === current)) {
         return current;
@@ -368,15 +397,41 @@ function Workbench() {
   }
 
   async function loadAgentRuns() {
-    const response = await fetch(`${API_BASE}/api/agent-runs?limit=8`);
+    const response = await fetch(`${API_BASE}/api/agent-runs?limit=3`);
     if (!response.ok) throw new Error("Unable to fetch agent runs");
     setAgentRuns(await response.json());
+    clearBackendReachabilityError();
+  }
+
+  async function refreshAgentRun(runId: string) {
+    const response = await fetch(`${API_BASE}/api/agent-runs/${encodeURIComponent(runId)}`);
+    if (!response.ok) throw new Error("Unable to fetch agent run status");
+    const run: AgentRun = await response.json();
+    applyRun(run);
+    if (run.status !== "running") {
+      await loadAgentRuns().catch(() => undefined);
+    }
+  }
+
+  function applyRun(run: AgentRun) {
+    setSelectedAgentRun(run);
+    setAnalysis(run.output_json?.analysis || null);
+    if (!testCasesDirty) {
+      setTestCases(run.output_json?.test_cases || []);
+    }
+    setTestCaseMeta({ engine: "llm", model: run.llm_model });
+    if (run.status === "failed") {
+      setError(run.error || "BRD analysis failed");
+    } else {
+      setError("");
+    }
   }
 
   async function selectTicket(ticket: Ticket) {
     setError("");
     setAnalysis(null);
     setTestCases([]);
+    setTestCasesDirty(false);
     setTestCaseMeta(null);
     setShowGeneratedTc(false);
     setActiveDetailTab("affected");
@@ -429,6 +484,7 @@ function Workbench() {
     setError("");
     setAnalysis(null);
     setTestCases([]);
+    setTestCasesDirty(false);
     setTestCaseMeta(null);
     setSelectedAgentRun(null);
     setShowGeneratedTc(false);
@@ -449,47 +505,72 @@ function Workbench() {
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail || "Unable to run TraceFix analysis");
+        throw new Error(payload.detail || "Unable to analyze BRD");
       }
       const run: AgentRun = await response.json();
       if (run.status === "failed") {
-        throw new Error(run.error || "TraceFix analysis failed");
+        throw new Error(run.error || "BRD analysis failed");
       }
-      setSelectedAgentRun(run);
-      setAnalysis(run.output_json?.analysis || null);
-      setTestCases(run.output_json?.test_cases || []);
-      setTestCaseMeta({ engine: "llm", model: run.llm_model });
+      applyRun(run);
       setShowGeneratedTc(false);
       setActiveDetailTab("affected");
       await loadAgentRuns().catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to run TraceFix analysis");
+      setError(err instanceof Error ? err.message : "Unable to analyze BRD");
     } finally {
       setLoading(null);
     }
   }
 
   function loadRunIntoWorkbench(run: AgentRun) {
-    setSelectedAgentRun(run);
-    setAnalysis(run.output_json?.analysis || null);
-    setTestCases(run.output_json?.test_cases || []);
-    setTestCaseMeta({ engine: "llm", model: run.llm_model });
+    setTestCasesDirty(false);
+    applyRun(run);
     setShowGeneratedTc(false);
     setActiveDetailTab("affected");
     setEditingCaseId("");
-    setError(run.status === "failed" ? run.error : "");
+  }
+
+  const runningRun = selectedAgentRun?.status === "running";
+
+  function updateTestCases(cases: TestCase[]) {
+    setTestCases(cases);
+    setTestCasesDirty(true);
+  }
+
+  async function saveTestCases() {
+    if (!selectedAgentRun?.run_id) return;
+    setSavingTestCases(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/agent-runs/${encodeURIComponent(selectedAgentRun.run_id)}/test-cases`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(testCases)
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || "Unable to save test cases");
+      }
+      const run: AgentRun = await response.json();
+      setTestCasesDirty(false);
+      setSelectedAgentRun(run);
+      setTestCases(run.output_json?.test_cases || []);
+      await loadAgentRuns().catch(() => undefined);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save test cases");
+    } finally {
+      setSavingTestCases(false);
+    }
   }
 
   return (
     <>
       <header className="pageHeader">
         <div>
-          <p className="eyebrow">Milestone 1</p>
-          <h1>Workbench</h1>
+          <h1>BRD Analysis</h1>
         </div>
-        <button className="primaryAction" onClick={analyzeBrd} disabled={loading === "analysis"}>
-          {loading === "analysis" ? <Loader2 className="spin" size={18} /> : <Bot size={18} />}
-          Run TraceFix Analysis
+        <button className="primaryAction" onClick={analyzeBrd} disabled={loading === "analysis" || runningRun}>
+          {loading === "analysis" || runningRun ? <Loader2 className="spin" size={18} /> : <Bot size={18} />}
+          {runningRun ? "Analyzing BRD" : "Analyze BRD"}
         </button>
       </header>
 
@@ -674,7 +755,9 @@ function Workbench() {
             {selectedTicket.brd_attachments[0].filename} from the ticket files section will be analyzed first.
           </div>
         ) : null}
-      </section>
+          </section>
+
+      {selectedAgentRun ? <AgentRunProgress run={selectedAgentRun} /> : null}
 
       {analysis && (
         <>
@@ -688,10 +771,12 @@ function Workbench() {
           {showGeneratedTc && testCases.length ? (
             <TestCasePanel
               testCases={testCases}
-              meta={testCaseMeta}
               editingCaseId={editingCaseId}
               onEdit={setEditingCaseId}
-              onChange={setTestCases}
+              onChange={updateTestCases}
+              onSave={saveTestCases}
+              dirty={testCasesDirty}
+              saving={savingTestCases}
             />
           ) : null}
           {selectedAgentRun?.output_json ? (
@@ -931,10 +1016,10 @@ function TicketHistorySidebar({
         </div>
         <History size={19} />
       </div>
-      <p className="historyNote">Runs are scoped to the currently saved OpenProject API token.</p>
+      <p className="historyNote">Showing the last 3 runs for the currently saved OpenProject API token.</p>
       <div className="ticketHistoryList">
         {runs.length ? (
-          runs.map((run) => (
+          runs.slice(0, 3).map((run) => (
             <button
               key={run.run_id}
               className={selectedRunId === run.run_id ? "ticketHistoryItem selected" : "ticketHistoryItem"}
@@ -956,17 +1041,47 @@ function TicketHistorySidebar({
   );
 }
 
+function AgentRunProgress({ run }: { run: AgentRun }) {
+  const steps = run.output_json?.steps?.length ? run.output_json.steps : run.steps || [];
+  return (
+    <section className="panel runProgressPanel">
+      <div className="panelTitle">
+        {run.status === "running" ? <Loader2 className="spin" size={19} /> : <CheckCircle2 size={19} />}
+        <h2>BRD Analysis Progress</h2>
+      </div>
+      <div className="progressMeta">
+        <Tag>{run.repo_name || run.repo_id || "Selected repository"}</Tag>
+        <Tag>{run.branch || "Selected branch"}</Tag>
+        <Tag>{run.status}</Tag>
+      </div>
+      <div className="stepRail">
+        {steps.length ? (
+          steps.map((step) => (
+            <div className={`stepPill ${step.status}`} key={`${step.step}-${step.message}`}>
+              <CheckCircle2 size={15} />
+              <span>{humanize(step.step)}</span>
+            </div>
+          ))
+        ) : (
+          <div className="stepPill running">
+            <Loader2 className="spin" size={15} />
+            <span>Starting run</span>
+          </div>
+        )}
+      </div>
+      {run.error ? <p className="docStatus">{run.error}</p> : null}
+    </section>
+  );
+}
+
 function AgentRunOverview({ run, output }: { run: AgentRun; output: AgentRunOutput }) {
   const metrics = output.impact_metrics;
   return (
     <section className="agentOverview">
       <div className="analysisHeader">
         <div>
-          <p className="eyebrow">TraceFix Agent Run</p>
+          <p className="eyebrow">Traceability</p>
           <h2>Traceability Report</h2>
-          <p className="tcEngine">
-            {run.run_id} · {run.llm_model || "configured model"} · BRD source: {run.brd_source || "ticket context"}
-          </p>
         </div>
         <ValidationBadge value={metrics.code_supported_cases ? "L2 Code-supported" : "L1 Requirement-derived"} />
       </div>
@@ -980,7 +1095,7 @@ function AgentRunOverview({ run, output }: { run: AgentRun; output: AgentRunOutp
       </div>
       <div className="tcMetrics impactMetrics">
         <Metric label="Manual baseline" value={metrics.manual_analysis_estimate_minutes} suffix="min" />
-        <Metric label="TraceFix runtime" value={metrics.tracefix_analysis_seconds} suffix="sec" />
+        <Metric label="Agent runtime" value={metrics.tracefix_analysis_seconds} suffix="sec" />
         <Metric label="Generated cases" value={metrics.generated_test_cases} />
         <Metric label="Requirement-linked" value={metrics.requirement_linked_cases} />
         <Metric label="Code-supported" value={metrics.code_supported_cases} />
@@ -1004,11 +1119,8 @@ function TcGenerationControl({
   return (
     <section className="panel tcGatePanel">
       <div>
-        <p className="eyebrow">TC Generation</p>
+        <p className="eyebrow">Quality Coverage</p>
         <h2>Generated Test Cases</h2>
-        <p className="docStatus">
-          Test cases are hidden until you choose to view them.
-        </p>
       </div>
       <div className="tcGateActions">
         <span className="successNote">
@@ -1088,11 +1200,28 @@ function AffectedFilesList({ files }: { files: AffectedFile[] }) {
             <div>
               <strong>{file.path}</strong>
               <p>{file.reason}</p>
+              {file.expected_change ? <small>{file.expected_change}</small> : null}
             </div>
             <div className="evidenceTags">
-              <Tag>{file.confidence}</Tag>
+              <Tag>{file.status || "needs_investigation"}</Tag>
+              <Tag>{typeof file.confidence_score === "number" ? `${file.confidence_score}/100` : file.confidence}</Tag>
               <Tag>{file.related_requirement || "requirement"}</Tag>
             </div>
+            {file.suspected_module || file.line_range || file.matched_symbols?.length ? (
+              <div className="targetBox">
+                {file.suspected_module ? <span><strong>Module:</strong> {file.suspected_module}</span> : null}
+                {file.line_range ? <span><strong>Lines:</strong> {file.line_range}</span> : null}
+                {file.matched_symbols?.length ? <span><strong>Symbols:</strong> {file.matched_symbols.join(", ")}</span> : null}
+              </div>
+            ) : null}
+            <InfoList label="Evidence" items={file.evidence || []} />
+            {file.evidence_snippets?.length ? (
+              <div className="snippetList">
+                {file.evidence_snippets.map((snippet, index) => (
+                  <pre key={`${file.path}-snippet-${index}`}>{snippet}</pre>
+                ))}
+              </div>
+            ) : null}
           </article>
         ))
       ) : (
@@ -1209,24 +1338,14 @@ function humanize(value: string) {
 }
 
 function AnalysisPanel({ analysis }: { analysis: Analysis }) {
-  const analysisEngine = analysis.metadata?.analysis_engine;
-  const llmModel = analysis.metadata?.llm_model;
   return (
     <section className="analysis">
       <div className="analysisHeader">
         <div>
-          <p className="eyebrow">Requirement Analysis</p>
+          <p className="eyebrow">BRD Intelligence</p>
           <h2>Requirement Summary</h2>
-          {analysisEngine ? (
-            <p className="tcEngine">
-              Analyzed by {analysisEngine === "llm" ? "LLM Gateway" : "local heuristic"}
-              {typeof llmModel === "string" && llmModel ? ` · ${llmModel}` : ""}
-            </p>
-          ) : null}
         </div>
-        <Tag>{analysis.source}</Tag>
       </div>
-      <p className="docStatus">{analysis.brd_text_status}</p>
       <div className="analysisGrid">
         <div className="panel summaryPanel">
           <h3>Summary</h3>
@@ -1253,16 +1372,20 @@ function AnalysisPanel({ analysis }: { analysis: Analysis }) {
 
 function TestCasePanel({
   testCases,
-  meta,
   editingCaseId,
   onEdit,
-  onChange
+  onChange,
+  onSave,
+  dirty,
+  saving
 }: {
   testCases: TestCase[];
-  meta: TestCaseMeta | null;
   editingCaseId: string;
   onEdit: (id: string) => void;
   onChange: (cases: TestCase[]) => void;
+  onSave: () => void;
+  dirty: boolean;
+  saving: boolean;
 }) {
   const existingCases = testCases.filter((testCase) => testCase.category === "existing");
   const newCases = testCases.filter((testCase) => testCase.category === "new");
@@ -1277,7 +1400,10 @@ function TestCasePanel({
   }
 
   function addCase() {
-    const nextNumber = testCases.length + 1;
+    const nextNumber = Math.max(
+      0,
+      ...testCases.map((testCase) => Number(testCase.id.replace(/^TC-/, ""))).filter(Number.isFinite)
+    ) + 1;
     const id = `TC-${String(nextNumber).padStart(3, "0")}`;
     onChange([
       ...testCases,
@@ -1307,16 +1433,14 @@ function TestCasePanel({
         <div>
           <p className="eyebrow">TC Generation</p>
           <h2>Generated Test Coverage</h2>
-          {meta ? (
-            <p className="tcEngine">
-              Generated by {meta.engine === "llm" ? "LLM Gateway" : "rule-based fallback"}
-              {meta.model ? ` · ${meta.model}` : ""}
-            </p>
-          ) : null}
         </div>
         <button className="secondaryAction" onClick={addCase}>
           <Plus size={17} />
           Add Test Case
+        </button>
+        <button className="primaryAction" onClick={onSave} disabled={!dirty || saving}>
+          {saving ? <Loader2 className="spin" size={17} /> : <CheckCircle2 size={17} />}
+          Save Test Cases
         </button>
       </div>
       <div className="tcMetrics">
@@ -1475,6 +1599,12 @@ function TcCard({
               onChange={(event) => onUpdate(testCase.id, { expected_result: event.target.value })}
             />
           </label>
+          <div className="tcEditActions" style={{ display: "flex", justifyContent: "flex-end", marginTop: "14px" }}>
+            <button className="primaryAction" onClick={() => onEdit("")}>
+              <CheckCircle2 size={16} />
+              Save changes
+            </button>
+          </div>
         </div>
       ) : (
         <>

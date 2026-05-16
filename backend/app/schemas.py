@@ -153,6 +153,14 @@ class AffectedFile(BaseModel):
     reason: str
     confidence: Literal["high", "medium", "low"] = "medium"
     related_requirement: str = ""
+    suspected_module: str = ""
+    confidence_score: int = 0
+    matched_symbols: list[str] = Field(default_factory=list)
+    line_range: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    evidence_snippets: list[str] = Field(default_factory=list)
+    expected_change: str = ""
+    status: Literal["to_be_modified", "needs_investigation"] = "needs_investigation"
 
 
 class MissingDependency(BaseModel):
@@ -213,6 +221,7 @@ class AgentRunRequest(BaseModel):
 
 class AgentRunOutput(BaseModel):
     analysis: BrdAnalyzeResponse
+    impact_analysis: dict[str, Any] = Field(default_factory=dict)
     test_case_summary: list[str] = Field(default_factory=list)
     test_cases: list[TestCase] = Field(default_factory=list)
     affected_files: list[AffectedFile] = Field(default_factory=list)
@@ -238,4 +247,5 @@ class AgentRun(BaseModel):
     started_at: str
     completed_at: str = ""
     output_json: AgentRunOutput | None = None
+    steps: list[AgentStep] = Field(default_factory=list)
     error: str = ""
