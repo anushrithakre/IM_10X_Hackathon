@@ -7,6 +7,7 @@ Milestone 1 implementation for the Intelligent QA + RCA agent:
 - BRD link extraction from selected ticket.
 - Repository and branch selection.
 - BRD fetch and requirement analysis.
+- Persisted TraceFix agent runs with run history, impact metrics, validation levels, affected files, missing dependency suggestions, RCA hypotheses, and traceable test cases.
 - Live API adapters with mock fallback data for demos.
 
 ## Run Backend
@@ -45,3 +46,4 @@ Open `http://localhost:3000`.
   `TRACEFIX_LLM_MODEL=openrouter/anthropic/claude-sonnet-4.6`, and `TRACEFIX_LLM_API_KEY=<access-key>` in `backend/.env`.
 - Repository context is fetched by the backend through GitLab-compatible SCM APIs using the saved SCM token. The LLM
   does not access GitLab directly; it receives BRD/ticket context plus selected repository snippets prepared by the backend.
+- The hackathon skill deliverable is available under `tracefix-skill/`.

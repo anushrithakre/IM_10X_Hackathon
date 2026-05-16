@@ -1,0 +1,22 @@
+name: sample-cron-or-service
+language: go
+type: cron-worker
+
+commands:
+  build: "go build ./..."
+  test: "go test ./..."
+
+entrypoints:
+  - name: daily-job
+    path: cmd/daily-job/main.go
+    schedule: "0 2 * * *"
+
+dependencies:
+  database: postgres
+  external_apis:
+    - customer-service
+    - tax-service
+
+business_mapping:
+  openproject_project: Billing
+  module: Invoice

@@ -459,6 +459,23 @@ class ScmClient:
                 raise
         return ""
 
+    async def fetch_agent_project_manifest(self, repo_id: str | None, branch: str | None) -> str:
+        if not repo_id or not branch or not (self.settings.scm_base_url and self.settings.scm_token):
+            return ""
+        raw_url = self._url(
+            f"/api/v4/projects/{quote(repo_id, safe='')}/repository/files/{quote('agent.project.yml', safe='')}/raw"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(raw_url, headers=self._headers(), params={"ref": branch})
+                if response.status_code >= 400:
+                    return ""
+                return response.text.strip()
+        except Exception:
+            if not self.allow_mock:
+                raise
+        return ""
+
     async def _list_live_repos(self, query: str) -> list[Repository]:
         url = self._url("/api/v4/projects")
         params = {"membership": "true", "simple": "true", "per_page": "50"}

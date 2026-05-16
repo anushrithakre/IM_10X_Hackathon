@@ -338,6 +338,9 @@ h3 {
 
 .detailPanel,
 .analysis,
+.agentOverview,
+.traceabilityGrid,
+.runHistoryPanel,
 .tcPanel {
   margin-top: 18px;
 }
@@ -562,6 +565,79 @@ h3 {
   padding: 22px;
 }
 
+.agentOverview {
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 22px;
+}
+
+.runHistoryPanel {
+  box-shadow: none;
+}
+
+.runHistoryList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.runHistoryItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 12px;
+  text-align: left;
+}
+
+.runHistoryItem.selected {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.runHistoryItem small {
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.stepRail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.stepPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #b7e4cf;
+  border-radius: 999px;
+  background: #f0fdf4;
+  color: #166534;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.stepPill.failed {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #be123c;
+}
+
+.impactMetrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
 .tcHeader {
   display: flex;
   align-items: center;
@@ -665,6 +741,36 @@ h3 {
   flex-wrap: wrap;
 }
 
+.validationBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  background: #edf4ff;
+  color: #1849a9;
+  padding: 2px 9px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.validation-l1 {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.validation-l2 {
+  background: #ecfdf3;
+  color: #027a48;
+}
+
+.validation-l3,
+.validation-l4,
+.validation-l5 {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
 .tcCard h4 {
   margin: 10px 0 0;
   font-size: 16px;
@@ -716,6 +822,113 @@ h3 {
   margin: 8px 0 0;
   color: #475467;
   line-height: 1.45;
+}
+
+.tcTraceability {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  margin-top: 14px;
+  padding-top: 12px;
+}
+
+.infoList span {
+  color: #344054;
+  display: block;
+  font-size: 13px;
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
+.infoList ul {
+  color: #475467;
+  line-height: 1.45;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.traceabilityGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+}
+
+.evidencePanel,
+.rcaPanel,
+.manifestPanel {
+  box-shadow: none;
+}
+
+.evidenceList,
+.rcaList {
+  display: grid;
+  gap: 12px;
+}
+
+.evidenceCard,
+.rcaCard {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 14px;
+}
+
+.evidenceCard.warning {
+  border-color: #ffd79b;
+  background: #fff7ed;
+}
+
+.evidenceCard strong,
+.rcaCard h3 {
+  overflow-wrap: anywhere;
+}
+
+.evidenceCard p,
+.evidenceCard small,
+.fixArea {
+  color: var(--muted);
+  line-height: 1.45;
+  margin: 6px 0 0;
+}
+
+.evidenceCard code {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #344054;
+  margin-top: 10px;
+  padding: 9px;
+  white-space: pre-wrap;
+}
+
+.evidenceTags,
+.rcaTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.rcaCard {
+  display: grid;
+  gap: 12px;
+}
+
+.manifestPanel {
+  grid-column: 1 / -1;
+}
+
+.manifestPanel pre {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e5e7eb;
+  margin: 12px 0 0;
+  overflow: auto;
+  padding: 14px;
+  white-space: pre-wrap;
 }
 
 .tcTitleInput,
@@ -995,6 +1208,7 @@ h3 {
   .tcMetrics,
   .tcColumns,
   .ticketDataGrid,
+  .traceabilityGrid,
   .formGrid {
     grid-template-columns: 1fr;
   }

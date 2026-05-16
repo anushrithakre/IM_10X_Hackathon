@@ -127,6 +127,11 @@ class TestCase(BaseModel):
     steps: list[str] = Field(default_factory=list)
     expected_result: str
     coverage: str = ""
+    requirement_evidence: list[str] = Field(default_factory=list)
+    code_evidence: list[str] = Field(default_factory=list)
+    validation_level: str = "L1 Requirement-derived"
+    missing_dependencies: list[str] = Field(default_factory=list)
+    affected_files: list[str] = Field(default_factory=list)
 
 
 class TestCaseGenerateRequest(BaseModel):
@@ -141,3 +146,79 @@ class TestCaseGenerateResponse(BaseModel):
     test_cases: list[TestCase]
     engine: Literal["llm", "rule_based"] = "rule_based"
     model: str = ""
+
+
+class AffectedFile(BaseModel):
+    path: str
+    reason: str
+    confidence: Literal["high", "medium", "low"] = "medium"
+    related_requirement: str = ""
+
+
+class MissingDependency(BaseModel):
+    name: str
+    reason: str
+    suggested_mock: str
+    db_validation_query: str = ""
+
+
+class RcaHypothesis(BaseModel):
+    title: str
+    confidence: Literal["high", "medium", "low"] = "medium"
+    evidence: list[str] = Field(default_factory=list)
+    likely_files: list[str] = Field(default_factory=list)
+    suggested_checks: list[str] = Field(default_factory=list)
+    suggested_fix_area: str = ""
+    validation_level: str = "L2 Code-supported"
+
+
+class ImpactMetrics(BaseModel):
+    manual_analysis_estimate_minutes: int = 25
+    tracefix_analysis_seconds: float = 0
+    generated_test_cases: int = 0
+    requirement_linked_cases: int = 0
+    code_supported_cases: int = 0
+    runtime_validated_cases: int = 0
+
+
+class AgentStep(BaseModel):
+    step: str
+    status: Literal["running", "done", "failed"] = "done"
+    message: str = ""
+
+
+class AgentRunRequest(BaseModel):
+    ticket_id: str
+    brd_url: str = ""
+    repo_id: str | None = None
+    repo_name: str = ""
+    branch: str | None = None
+
+
+class AgentRunOutput(BaseModel):
+    analysis: BrdAnalyzeResponse
+    test_case_summary: list[str] = Field(default_factory=list)
+    test_cases: list[TestCase] = Field(default_factory=list)
+    affected_files: list[AffectedFile] = Field(default_factory=list)
+    missing_dependencies: list[MissingDependency] = Field(default_factory=list)
+    rca_hypotheses: list[RcaHypothesis] = Field(default_factory=list)
+    impact_metrics: ImpactMetrics = Field(default_factory=ImpactMetrics)
+    suggested_agent_project_yml: str = ""
+    steps: list[AgentStep] = Field(default_factory=list)
+
+
+class AgentRun(BaseModel):
+    run_id: str
+    mode: str = "qa_analysis"
+    ticket_id: str
+    repo_id: str = ""
+    repo_name: str = ""
+    branch: str = ""
+    brd_source: str = ""
+    files_used: list[str] = Field(default_factory=list)
+    llm_model: str = ""
+    status: Literal["running", "completed", "failed"] = "running"
+    started_at: str
+    completed_at: str = ""
+    output_json: AgentRunOutput | None = None
+    error: str = ""

@@ -9,9 +9,10 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from .agent_runner import AgentRunExecutor
 from .analyzer import RequirementAnalyzer
 from .clients import GoogleDocClient, ProjectClient, ScmClient
-from .schemas import AppSettings, BrdAnalyzeRequest, TestCaseGenerateRequest
+from .schemas import AgentRunRequest, AppSettings, BrdAnalyzeRequest, TestCaseGenerateRequest
 from .settings_store import SettingsStore
 from .testcase_generator import TestCaseGenerator
 
@@ -159,6 +160,25 @@ async def list_branches(repo_id: str, query: str = Query(default="")):
     settings = store.load()
     client = ScmClient(settings, store.mock_fallback_enabled)
     return await client.list_branches(repo_id, query)
+
+
+@app.post("/api/agent-runs")
+async def create_agent_run(request: AgentRunRequest):
+    settings = store.load()
+    return await AgentRunExecutor(settings, store).run(request)
+
+
+@app.get("/api/agent-runs")
+async def list_agent_runs(limit: int = Query(default=20, ge=1, le=50)):
+    return store.list_agent_runs(limit)
+
+
+@app.get("/api/agent-runs/{run_id}")
+async def get_agent_run(run_id: str):
+    run = store.get_agent_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return run
 
 
 @app.post("/api/brd/analyze")

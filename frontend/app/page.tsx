@@ -6,7 +6,9 @@ import {
   CheckCircle2,
   ClipboardList,
   Edit3,
+  FileSearch,
   GitBranch,
+  History,
   KeyRound,
   Loader2,
   Plus,
@@ -87,6 +89,11 @@ type TestCase = {
   steps: string[];
   expected_result: string;
   coverage: string;
+  requirement_evidence: string[];
+  code_evidence: string[];
+  validation_level: string;
+  missing_dependencies: string[];
+  affected_files: string[];
 };
 
 type TestCaseMeta = {
@@ -117,6 +124,74 @@ type SettingsForm = {
   scm_token: string;
   google_client_id: string;
   google_client_secret: string;
+};
+
+type AffectedFile = {
+  path: string;
+  reason: string;
+  confidence: "high" | "medium" | "low";
+  related_requirement: string;
+};
+
+type MissingDependency = {
+  name: string;
+  reason: string;
+  suggested_mock: string;
+  db_validation_query: string;
+};
+
+type RcaHypothesis = {
+  title: string;
+  confidence: "high" | "medium" | "low";
+  evidence: string[];
+  likely_files: string[];
+  suggested_checks: string[];
+  suggested_fix_area: string;
+  validation_level: string;
+};
+
+type ImpactMetrics = {
+  manual_analysis_estimate_minutes: number;
+  tracefix_analysis_seconds: number;
+  generated_test_cases: number;
+  requirement_linked_cases: number;
+  code_supported_cases: number;
+  runtime_validated_cases: number;
+};
+
+type AgentStep = {
+  step: string;
+  status: "running" | "done" | "failed";
+  message: string;
+};
+
+type AgentRunOutput = {
+  analysis: Analysis;
+  test_case_summary: string[];
+  test_cases: TestCase[];
+  affected_files: AffectedFile[];
+  missing_dependencies: MissingDependency[];
+  rca_hypotheses: RcaHypothesis[];
+  impact_metrics: ImpactMetrics;
+  suggested_agent_project_yml: string;
+  steps: AgentStep[];
+};
+
+type AgentRun = {
+  run_id: string;
+  mode: string;
+  ticket_id: string;
+  repo_id: string;
+  repo_name: string;
+  branch: string;
+  brd_source: string;
+  files_used: string[];
+  llm_model: string;
+  status: "running" | "completed" | "failed";
+  started_at: string;
+  completed_at: string;
+  output_json: AgentRunOutput | null;
+  error: string;
 };
 
 const defaultSettings: SettingsForm = {
@@ -204,6 +279,8 @@ function Workbench() {
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [testCases, setTestCases] = useState<TestCase[]>([]);
   const [testCaseMeta, setTestCaseMeta] = useState<TestCaseMeta | null>(null);
+  const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
+  const [selectedAgentRun, setSelectedAgentRun] = useState<AgentRun | null>(null);
   const [editingCaseId, setEditingCaseId] = useState("");
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -211,6 +288,7 @@ function Workbench() {
   useEffect(() => {
     loadTickets("").catch((err) => setError(err.message));
     loadRepos("").catch((err) => setError(err.message));
+    loadAgentRuns().catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -269,6 +347,12 @@ function Workbench() {
     });
   }
 
+  async function loadAgentRuns() {
+    const response = await fetch(`${API_BASE}/api/agent-runs?limit=8`);
+    if (!response.ok) throw new Error("Unable to fetch agent runs");
+    setAgentRuns(await response.json());
+  }
+
   async function selectTicket(ticket: Ticket) {
     setError("");
     setAnalysis(null);
@@ -324,29 +408,48 @@ function Workbench() {
     setAnalysis(null);
     setTestCases([]);
     setTestCaseMeta(null);
+    setSelectedAgentRun(null);
     setEditingCaseId("");
     setLoading("analysis");
     try {
-      const response = await fetch(`${API_BASE}/api/brd/analyze`, {
+      const response = await fetch(`${API_BASE}/api/agent-runs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ticket_id: selectedTicket?.id,
           brd_url: brdUrl,
           repo_id: selectedRepo?.id,
+          repo_name: selectedRepo?.name || selectedRepo?.path || "",
           branch: selectedBranch
         })
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail || "Unable to analyze BRD");
+        throw new Error(payload.detail || "Unable to run TraceFix analysis");
       }
-      setAnalysis(await response.json());
+      const run: AgentRun = await response.json();
+      if (run.status === "failed") {
+        throw new Error(run.error || "TraceFix analysis failed");
+      }
+      setSelectedAgentRun(run);
+      setAnalysis(run.output_json?.analysis || null);
+      setTestCases(run.output_json?.test_cases || []);
+      setTestCaseMeta({ engine: "llm", model: run.llm_model });
+      await loadAgentRuns().catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to analyze BRD");
+      setError(err instanceof Error ? err.message : "Unable to run TraceFix analysis");
     } finally {
       setLoading(null);
     }
+  }
+
+  function loadRunIntoWorkbench(run: AgentRun) {
+    setSelectedAgentRun(run);
+    setAnalysis(run.output_json?.analysis || null);
+    setTestCases(run.output_json?.test_cases || []);
+    setTestCaseMeta({ engine: "llm", model: run.llm_model });
+    setEditingCaseId("");
+    setError(run.status === "failed" ? run.error : "");
   }
 
   async function generateTestCases() {
@@ -391,7 +494,7 @@ function Workbench() {
         </div>
         <button className="primaryAction" onClick={analyzeBrd} disabled={loading === "analysis"}>
           {loading === "analysis" ? <Loader2 className="spin" size={18} /> : <Bot size={18} />}
-          Analyze BRD
+          Run TraceFix Analysis
         </button>
       </header>
 
@@ -482,6 +585,30 @@ function Workbench() {
           </div>
         </section>
       </div>
+
+      {agentRuns.length ? (
+        <section className="panel runHistoryPanel">
+          <div className="panelTitle">
+            <History size={19} />
+            <h2>Recent Agent Runs</h2>
+          </div>
+          <div className="runHistoryList">
+            {agentRuns.map((run) => (
+              <button
+                key={run.run_id}
+                className={selectedAgentRun?.run_id === run.run_id ? "runHistoryItem selected" : "runHistoryItem"}
+                onClick={() => loadRunIntoWorkbench(run)}
+              >
+                <span>
+                  <strong>{run.ticket_id}</strong>
+                  <small>{run.repo_name || run.repo_id || "repo"} · {run.branch || "branch"} · {formatDate(run.started_at)}</small>
+                </span>
+                <Tag>{run.status}</Tag>
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="panel detailPanel">
         <div className="panelTitle">
@@ -578,13 +705,9 @@ function Workbench() {
 
       {analysis && (
         <>
+          {selectedAgentRun?.output_json ? <AgentRunOverview run={selectedAgentRun} output={selectedAgentRun.output_json} /> : null}
           <AnalysisPanel analysis={analysis} />
-          <div className="tcActionBar">
-            <button className="primaryAction" onClick={generateTestCases} disabled={loading === "testcases"}>
-              {loading === "testcases" ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              Generate TC
-            </button>
-          </div>
+          {selectedAgentRun?.output_json ? <TraceabilityPanels output={selectedAgentRun.output_json} /> : null}
         </>
       )}
       {testCases.length ? (
@@ -798,6 +921,146 @@ function EmptyState({ text }: { text: string }) {
   return <div className="emptyState">{text}</div>;
 }
 
+function AgentRunOverview({ run, output }: { run: AgentRun; output: AgentRunOutput }) {
+  const metrics = output.impact_metrics;
+  return (
+    <section className="agentOverview">
+      <div className="analysisHeader">
+        <div>
+          <p className="eyebrow">TraceFix Agent Run</p>
+          <h2>Traceability Report</h2>
+          <p className="tcEngine">
+            {run.run_id} · {run.llm_model || "configured model"} · BRD source: {run.brd_source || "ticket context"}
+          </p>
+        </div>
+        <ValidationBadge value={metrics.code_supported_cases ? "L2 Code-supported" : "L1 Requirement-derived"} />
+      </div>
+      <div className="stepRail">
+        {output.steps.map((step) => (
+          <div className={`stepPill ${step.status}`} key={`${step.step}-${step.message}`}>
+            <CheckCircle2 size={15} />
+            <span>{humanize(step.step)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="tcMetrics impactMetrics">
+        <Metric label="Manual baseline" value={metrics.manual_analysis_estimate_minutes} suffix="min" />
+        <Metric label="TraceFix runtime" value={metrics.tracefix_analysis_seconds} suffix="sec" />
+        <Metric label="Generated cases" value={metrics.generated_test_cases} />
+        <Metric label="Requirement-linked" value={metrics.requirement_linked_cases} />
+        <Metric label="Code-supported" value={metrics.code_supported_cases} />
+        <Metric label="Runtime validated" value={metrics.runtime_validated_cases} />
+      </div>
+    </section>
+  );
+}
+
+function TraceabilityPanels({ output }: { output: AgentRunOutput }) {
+  return (
+    <section className="traceabilityGrid">
+      <div className="panel evidencePanel">
+        <div className="panelTitle">
+          <FileSearch size={19} />
+          <h2>Affected Files</h2>
+        </div>
+        <div className="evidenceList">
+          {output.affected_files.length ? (
+            output.affected_files.map((file) => (
+              <article className="evidenceCard" key={`${file.path}-${file.reason}`}>
+                <div>
+                  <strong>{file.path}</strong>
+                  <p>{file.reason}</p>
+                </div>
+                <div className="evidenceTags">
+                  <Tag>{file.confidence}</Tag>
+                  <Tag>{file.related_requirement || "requirement"}</Tag>
+                </div>
+              </article>
+            ))
+          ) : (
+            <EmptyState text="No code-supported affected files found." />
+          )}
+        </div>
+      </div>
+
+      <div className="panel evidencePanel">
+        <div className="panelTitle">
+          <AlertTriangle size={19} />
+          <h2>Missing Dependencies / Mock Suggestions</h2>
+        </div>
+        <div className="evidenceList">
+          {output.missing_dependencies.length ? (
+            output.missing_dependencies.map((dependency) => (
+              <article className="evidenceCard warning" key={dependency.name}>
+                <div>
+                  <strong>{dependency.name}</strong>
+                  <p>{dependency.reason}</p>
+                  <small>{dependency.suggested_mock}</small>
+                  {dependency.db_validation_query ? <code>{dependency.db_validation_query}</code> : null}
+                </div>
+              </article>
+            ))
+          ) : (
+            <EmptyState text="No missing dependency was detected from current context." />
+          )}
+        </div>
+      </div>
+
+      <div className="panel rcaPanel">
+        <div className="panelTitle">
+          <Bot size={19} />
+          <h2>RCA Hypotheses</h2>
+        </div>
+        <div className="rcaList">
+          {output.rca_hypotheses.map((hypothesis) => (
+            <article className="rcaCard" key={hypothesis.title}>
+              <div className="rcaTop">
+                <h3>{hypothesis.title}</h3>
+                <div className="evidenceTags">
+                  <Tag>{hypothesis.confidence}</Tag>
+                  <ValidationBadge value={hypothesis.validation_level} />
+                </div>
+              </div>
+              <InfoList label="Evidence" items={hypothesis.evidence} />
+              <InfoList label="Likely files" items={hypothesis.likely_files} />
+              <InfoList label="Suggested checks" items={hypothesis.suggested_checks} />
+              {hypothesis.suggested_fix_area ? (
+                <p className="fixArea"><strong>Suggested fix area:</strong> {hypothesis.suggested_fix_area}</p>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      </div>
+
+      {output.suggested_agent_project_yml ? (
+        <div className="panel manifestPanel">
+          <h2>Suggested agent.project.yml</h2>
+          <pre>{output.suggested_agent_project_yml}</pre>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ValidationBadge({ value }: { value: string }) {
+  const level = value.split(" ")[0] || "L1";
+  return <span className={`validationBadge validation-${level.toLowerCase()}`}>{value}</span>;
+}
+
+function InfoList({ label, items }: { label: string; items: string[] }) {
+  if (!items?.length) return null;
+  return (
+    <div className="infoList">
+      <span>{label}</span>
+      <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>
+    </div>
+  );
+}
+
+function humanize(value: string) {
+  return value.replace(/_/g, " ");
+}
+
 function AnalysisPanel({ analysis }: { analysis: Analysis }) {
   const analysisEngine = analysis.metadata?.analysis_engine;
   const llmModel = analysis.metadata?.llm_model;
@@ -880,7 +1143,12 @@ function TestCasePanel({
         preconditions: ["Add precondition"],
         steps: ["Add test step"],
         expected_result: "Add expected result",
-        coverage: "Manual addition"
+        coverage: "Manual addition",
+        requirement_evidence: ["Manual test case added by reviewer"],
+        code_evidence: [],
+        validation_level: "L1 Requirement-derived",
+        missing_dependencies: [],
+        affected_files: []
       }
     ]);
     onEdit(id);
@@ -933,10 +1201,10 @@ function TestCasePanel({
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value, suffix = "" }: { label: string; value: number; suffix?: string }) {
   return (
     <div className="tcMetric">
-      <strong>{value}</strong>
+      <strong>{value}{suffix ? ` ${suffix}` : ""}</strong>
       <span>{label}</span>
     </div>
   );
@@ -1008,6 +1276,7 @@ function TcCard({
             <Tag>{testCase.id}</Tag>
             <Tag>{testCase.priority}</Tag>
             <Tag>{testCase.test_type}</Tag>
+            <ValidationBadge value={testCase.validation_level || "L1 Requirement-derived"} />
           </div>
           {editing ? (
             <input
@@ -1073,6 +1342,11 @@ function TcCard({
           <div className="tcExpected">
             <span>Expected</span>
             <p>{testCase.expected_result}</p>
+          </div>
+          <div className="tcTraceability">
+            <InfoList label="Requirement evidence" items={testCase.requirement_evidence || []} />
+            <InfoList label="Code evidence" items={testCase.code_evidence || testCase.affected_files || []} />
+            <InfoList label="Missing dependencies" items={testCase.missing_dependencies || []} />
           </div>
         </>
       )}

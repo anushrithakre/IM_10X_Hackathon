@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .schemas import AppSettings, ConnectionStatus, SettingsStatus
+from .schemas import AgentRun, AppSettings, ConnectionStatus, SettingsStatus
 
 load_dotenv()
 
@@ -45,6 +45,15 @@ class SettingsStore:
                 CREATE TABLE IF NOT EXISTS app_settings (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     payload TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
@@ -142,6 +151,37 @@ class SettingsStore:
             ),
             mock_fallback_enabled=self.mock_fallback_enabled,
         )
+
+    def save_agent_run(self, run: AgentRun) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_runs (id, payload)
+                VALUES (?, ?)
+                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
+                """,
+                (run.run_id, run.model_dump_json()),
+            )
+
+    def list_agent_runs(self, limit: int = 20) -> list[AgentRun]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload FROM agent_runs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [AgentRun.model_validate_json(row[0]) for row in rows]
+
+    def get_agent_run(self, run_id: str) -> AgentRun | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM agent_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        return AgentRun.model_validate_json(row[0]) if row else None
 
     def _protect(self, value: str) -> str:
         if not value:
