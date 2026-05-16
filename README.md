@@ -43,7 +43,7 @@ Open `http://localhost:3000`.
 - For Google OAuth, add the exact redirect URI shown on the Settings page to Google Cloud Console.
 - Save Google Client ID and Client Secret in Settings, then click `Connect Google`.
 - For LLM Gateway, set `TRACEFIX_LLM_PROVIDER=custom`, `TRACEFIX_LLM_BASE_URL=https://imllm.intermesh.net/v1`,
-  `TRACEFIX_LLM_MODEL=openrouter/anthropic/claude-sonnet-4.6`, and `TRACEFIX_LLM_API_KEY=<access-key>` in `backend/.env`.
+  `TRACEFIX_LLM_MODEL=openrouter/anthropic/claude-opus-4.6`, and `TRACEFIX_LLM_API_KEY=<access-key>` in `backend/.env`.
 - Repository context is fetched by the backend through GitLab-compatible SCM APIs using the saved SCM token. The LLM
   does not access GitLab directly; it receives BRD/ticket context plus selected repository snippets prepared by the backend.
 - The hackathon skill deliverable is available under `tracefix-skill/`.

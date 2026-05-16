@@ -24,6 +24,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 
 type Tab = "workbench" | "settings";
+type DetailTab = "affected" | "trace" | "code" | "dependencies" | "rca";
 
 type Ticket = {
   id: string;
@@ -150,6 +151,22 @@ type RcaHypothesis = {
   validation_level: string;
 };
 
+type CodeChangeSuggestion = {
+  title: string;
+  change_type: "modify" | "create" | "db" | "config" | "cross_repo" | "blocked";
+  target_file: string;
+  target_symbol: string;
+  rationale: string;
+  implementation_steps: string[];
+  suggested_patch: string;
+  safety_notes: string[];
+  tests_to_add: string[];
+  dependencies: string[];
+  confidence: "high" | "medium" | "low";
+  blocker_reason: string;
+  validation_level: string;
+};
+
 type ImpactMetrics = {
   manual_analysis_estimate_minutes: number;
   tracefix_analysis_seconds: number;
@@ -172,6 +189,7 @@ type AgentRunOutput = {
   affected_files: AffectedFile[];
   missing_dependencies: MissingDependency[];
   rca_hypotheses: RcaHypothesis[];
+  code_change_suggestions: CodeChangeSuggestion[];
   impact_metrics: ImpactMetrics;
   suggested_agent_project_yml: string;
   steps: AgentStep[];
@@ -281,6 +299,8 @@ function Workbench() {
   const [testCaseMeta, setTestCaseMeta] = useState<TestCaseMeta | null>(null);
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
   const [selectedAgentRun, setSelectedAgentRun] = useState<AgentRun | null>(null);
+  const [showGeneratedTc, setShowGeneratedTc] = useState(false);
+  const [activeDetailTab, setActiveDetailTab] = useState<DetailTab>("affected");
   const [editingCaseId, setEditingCaseId] = useState("");
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -358,6 +378,8 @@ function Workbench() {
     setAnalysis(null);
     setTestCases([]);
     setTestCaseMeta(null);
+    setShowGeneratedTc(false);
+    setActiveDetailTab("affected");
     setEditingCaseId("");
     setLoading("ticket");
     try {
@@ -409,6 +431,8 @@ function Workbench() {
     setTestCases([]);
     setTestCaseMeta(null);
     setSelectedAgentRun(null);
+    setShowGeneratedTc(false);
+    setActiveDetailTab("affected");
     setEditingCaseId("");
     setLoading("analysis");
     try {
@@ -435,6 +459,8 @@ function Workbench() {
       setAnalysis(run.output_json?.analysis || null);
       setTestCases(run.output_json?.test_cases || []);
       setTestCaseMeta({ engine: "llm", model: run.llm_model });
+      setShowGeneratedTc(false);
+      setActiveDetailTab("affected");
       await loadAgentRuns().catch(() => undefined);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to run TraceFix analysis");
@@ -448,41 +474,10 @@ function Workbench() {
     setAnalysis(run.output_json?.analysis || null);
     setTestCases(run.output_json?.test_cases || []);
     setTestCaseMeta({ engine: "llm", model: run.llm_model });
+    setShowGeneratedTc(false);
+    setActiveDetailTab("affected");
     setEditingCaseId("");
     setError(run.status === "failed" ? run.error : "");
-  }
-
-  async function generateTestCases() {
-    if (!analysis) {
-      setError("Run BRD analysis before generating test cases.");
-      return;
-    }
-    setError("");
-    setLoading("testcases");
-    try {
-      const response = await fetch(`${API_BASE}/api/test-cases/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ticket_id: selectedTicket?.id,
-          repo_id: selectedRepo?.id,
-          branch: selectedBranch,
-          analysis
-        })
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail || "Unable to generate test cases");
-      }
-      const payload: { test_cases: TestCase[]; engine: "llm" | "rule_based"; model: string } = await response.json();
-      setTestCases(payload.test_cases);
-      setTestCaseMeta({ engine: payload.engine, model: payload.model });
-      setEditingCaseId("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to generate test cases");
-    } finally {
-      setLoading(null);
-    }
   }
 
   return (
@@ -505,112 +500,90 @@ function Workbench() {
         </div>
       )}
 
-      <div className="workbenchGrid">
-        <section className="panel">
-          <div className="panelTitle">
-            <TicketCheck size={19} />
-            <h2>Assigned Tickets</h2>
-          </div>
-          <SearchBox
-            value={ticketQuery}
-            onChange={setTicketQuery}
-            placeholder="Search by ticket ID or title"
-          />
-          <div className="listBox">
-            {tickets.map((ticket) => (
-              <button
-                className={selectedTicket?.id === ticket.id ? "listItem selected" : "listItem"}
-                key={ticket.id}
-                onClick={() => selectTicket(ticket)}
-              >
-                <span>
-                  <strong>{ticket.id}</strong>
-                  <small>{ticket.title}</small>
-                </span>
-                <Tag>{ticket.source}</Tag>
-              </button>
-            ))}
-            {!tickets.length && <EmptyState text="No open tickets assigned to you." />}
-          </div>
-        </section>
+      <div className="workbenchWithHistory">
+        <div className="workbenchMain">
+          <div className="workbenchGrid">
+            <section className="panel">
+              <div className="panelTitle">
+                <TicketCheck size={19} />
+                <h2>Assigned Tickets</h2>
+              </div>
+              <SearchBox
+                value={ticketQuery}
+                onChange={setTicketQuery}
+                placeholder="Search by ticket ID or title"
+              />
+              <div className="listBox">
+                {tickets.map((ticket) => (
+                  <button
+                    className={selectedTicket?.id === ticket.id ? "listItem selected" : "listItem"}
+                    key={ticket.id}
+                    onClick={() => selectTicket(ticket)}
+                  >
+                    <span>
+                      <strong>{ticket.id}</strong>
+                      <small>{ticket.title}</small>
+                    </span>
+                    <Tag>{ticket.source}</Tag>
+                  </button>
+                ))}
+                {!tickets.length && <EmptyState text="No open tickets assigned to you." />}
+              </div>
+            </section>
 
-        <section className="panel repoPanel">
-          <div className="panelTitle">
-            <GitBranch size={19} />
-            <h2>Select Repository & Branch</h2>
+            <section className="panel repoPanel">
+              <div className="panelTitle">
+                <GitBranch size={19} />
+                <h2>Select Repository & Branch</h2>
+              </div>
+              <SearchBox
+                value={repoQuery}
+                onChange={setRepoQuery}
+                placeholder="Search repository"
+              />
+              <div className="listBox repoList">
+                {repos.map((repo) => (
+                  <button
+                    className={selectedRepo?.id === repo.id ? "listItem selected" : "listItem"}
+                    key={repo.id}
+                    onClick={() => selectRepo(repo)}
+                  >
+                    <span>
+                      <strong>{repo.name}</strong>
+                      <small>{repo.path}</small>
+                    </span>
+                    <Tag>{repo.source}</Tag>
+                  </button>
+                ))}
+                {!repos.length && <EmptyState text="No repositories found." />}
+              </div>
+              <div className="field compact">
+                <span>Target branch</span>
+                <SearchBox
+                  value={branchQuery}
+                  onChange={setBranchQuery}
+                  placeholder="Search branch, e.g. production"
+                />
+                <select
+                  value={selectedBranch}
+                  onChange={(event) => setSelectedBranch(event.target.value)}
+                  disabled={!selectedRepo || loading === "branches"}
+                >
+                  <option value="">
+                    {loading === "branches" ? "Loading branches..." : "Select branch"}
+                  </option>
+                  {branches.map((branch) => (
+                    <option key={branch.name} value={branch.name}>
+                      {branch.name}
+                      {branch.default ? " (default)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </section>
           </div>
-          <SearchBox
-            value={repoQuery}
-            onChange={setRepoQuery}
-            placeholder="Search repository"
-          />
-          <div className="listBox repoList">
-            {repos.map((repo) => (
-              <button
-                className={selectedRepo?.id === repo.id ? "listItem selected" : "listItem"}
-                key={repo.id}
-                onClick={() => selectRepo(repo)}
-              >
-                <span>
-                  <strong>{repo.name}</strong>
-                  <small>{repo.path}</small>
-                </span>
-                <Tag>{repo.source}</Tag>
-              </button>
-            ))}
-            {!repos.length && <EmptyState text="No repositories found." />}
-          </div>
-          <div className="field compact">
-            <span>Target branch</span>
-            <SearchBox
-              value={branchQuery}
-              onChange={setBranchQuery}
-              placeholder="Search branch, e.g. production"
-            />
-            <select
-              value={selectedBranch}
-              onChange={(event) => setSelectedBranch(event.target.value)}
-              disabled={!selectedRepo || loading === "branches"}
-            >
-              <option value="">
-                {loading === "branches" ? "Loading branches..." : "Select branch"}
-              </option>
-              {branches.map((branch) => (
-                <option key={branch.name} value={branch.name}>
-                  {branch.name}
-                  {branch.default ? " (default)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-        </section>
-      </div>
 
-      {agentRuns.length ? (
-        <section className="panel runHistoryPanel">
-          <div className="panelTitle">
-            <History size={19} />
-            <h2>Recent Agent Runs</h2>
-          </div>
-          <div className="runHistoryList">
-            {agentRuns.map((run) => (
-              <button
-                key={run.run_id}
-                className={selectedAgentRun?.run_id === run.run_id ? "runHistoryItem selected" : "runHistoryItem"}
-                onClick={() => loadRunIntoWorkbench(run)}
-              >
-                <span>
-                  <strong>{run.ticket_id}</strong>
-                  <small>{run.repo_name || run.repo_id || "repo"} · {run.branch || "branch"} · {formatDate(run.started_at)}</small>
-                </span>
-                <Tag>{run.status}</Tag>
-              </button>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      <section className="panel detailPanel">
+          <section className="panel detailPanel">
         <div className="panelTitle">
           <ClipboardList size={19} />
           <h2>Ticket & BRD Source</h2>
@@ -705,20 +678,39 @@ function Workbench() {
 
       {analysis && (
         <>
-          {selectedAgentRun?.output_json ? <AgentRunOverview run={selectedAgentRun} output={selectedAgentRun.output_json} /> : null}
           <AnalysisPanel analysis={analysis} />
-          {selectedAgentRun?.output_json ? <TraceabilityPanels output={selectedAgentRun.output_json} /> : null}
+          <TcGenerationControl
+            viewing={showGeneratedTc}
+            hasCases={testCases.length > 0}
+            onView={() => setShowGeneratedTc(true)}
+            onClose={() => setShowGeneratedTc(false)}
+          />
+          {showGeneratedTc && testCases.length ? (
+            <TestCasePanel
+              testCases={testCases}
+              meta={testCaseMeta}
+              editingCaseId={editingCaseId}
+              onEdit={setEditingCaseId}
+              onChange={setTestCases}
+            />
+          ) : null}
+          {selectedAgentRun?.output_json ? (
+            <TraceabilityPanels
+              run={selectedAgentRun}
+              output={selectedAgentRun.output_json}
+              activeTab={activeDetailTab}
+              onTabChange={setActiveDetailTab}
+            />
+          ) : null}
         </>
       )}
-      {testCases.length ? (
-        <TestCasePanel
-          testCases={testCases}
-          meta={testCaseMeta}
-          editingCaseId={editingCaseId}
-          onEdit={setEditingCaseId}
-          onChange={setTestCases}
+        </div>
+        <TicketHistorySidebar
+          runs={agentRuns}
+          selectedRunId={selectedAgentRun?.run_id || ""}
+          onSelect={loadRunIntoWorkbench}
         />
-      ) : null}
+      </div>
     </>
   );
 }
@@ -921,6 +913,49 @@ function EmptyState({ text }: { text: string }) {
   return <div className="emptyState">{text}</div>;
 }
 
+function TicketHistorySidebar({
+  runs,
+  selectedRunId,
+  onSelect
+}: {
+  runs: AgentRun[];
+  selectedRunId: string;
+  onSelect: (run: AgentRun) => void;
+}) {
+  return (
+    <aside className="ticketHistorySidebar">
+      <div className="ticketHistoryHeader">
+        <div>
+          <p className="eyebrow">OpenProject Account</p>
+          <h2>Ticket History</h2>
+        </div>
+        <History size={19} />
+      </div>
+      <p className="historyNote">Runs are scoped to the currently saved OpenProject API token.</p>
+      <div className="ticketHistoryList">
+        {runs.length ? (
+          runs.map((run) => (
+            <button
+              key={run.run_id}
+              className={selectedRunId === run.run_id ? "ticketHistoryItem selected" : "ticketHistoryItem"}
+              onClick={() => onSelect(run)}
+            >
+              <span>
+                <strong>{run.ticket_id}</strong>
+                <small>{run.repo_name || run.repo_id || "repo"} · {run.branch || "branch"}</small>
+                <small>{formatDate(run.started_at)}</small>
+              </span>
+              <Tag>{run.status}</Tag>
+            </button>
+          ))
+        ) : (
+          <EmptyState text="No ticket history for this OpenProject token yet." />
+        )}
+      </div>
+    </aside>
+  );
+}
+
 function AgentRunOverview({ run, output }: { run: AgentRun; output: AgentRunOutput }) {
   const metrics = output.impact_metrics;
   return (
@@ -955,90 +990,202 @@ function AgentRunOverview({ run, output }: { run: AgentRun; output: AgentRunOutp
   );
 }
 
-function TraceabilityPanels({ output }: { output: AgentRunOutput }) {
+function TcGenerationControl({
+  viewing,
+  hasCases,
+  onView,
+  onClose
+}: {
+  viewing: boolean;
+  hasCases: boolean;
+  onView: () => void;
+  onClose: () => void;
+}) {
   return (
-    <section className="traceabilityGrid">
-      <div className="panel evidencePanel">
-        <div className="panelTitle">
-          <FileSearch size={19} />
-          <h2>Affected Files</h2>
-        </div>
-        <div className="evidenceList">
-          {output.affected_files.length ? (
-            output.affected_files.map((file) => (
-              <article className="evidenceCard" key={`${file.path}-${file.reason}`}>
-                <div>
-                  <strong>{file.path}</strong>
-                  <p>{file.reason}</p>
-                </div>
-                <div className="evidenceTags">
-                  <Tag>{file.confidence}</Tag>
-                  <Tag>{file.related_requirement || "requirement"}</Tag>
-                </div>
-              </article>
-            ))
-          ) : (
-            <EmptyState text="No code-supported affected files found." />
-          )}
-        </div>
+    <section className="panel tcGatePanel">
+      <div>
+        <p className="eyebrow">TC Generation</p>
+        <h2>Generated Test Cases</h2>
+        <p className="docStatus">
+          Test cases are hidden until you choose to view them.
+        </p>
       </div>
-
-      <div className="panel evidencePanel">
-        <div className="panelTitle">
-          <AlertTriangle size={19} />
-          <h2>Missing Dependencies / Mock Suggestions</h2>
-        </div>
-        <div className="evidenceList">
-          {output.missing_dependencies.length ? (
-            output.missing_dependencies.map((dependency) => (
-              <article className="evidenceCard warning" key={dependency.name}>
-                <div>
-                  <strong>{dependency.name}</strong>
-                  <p>{dependency.reason}</p>
-                  <small>{dependency.suggested_mock}</small>
-                  {dependency.db_validation_query ? <code>{dependency.db_validation_query}</code> : null}
-                </div>
-              </article>
-            ))
-          ) : (
-            <EmptyState text="No missing dependency was detected from current context." />
-          )}
-        </div>
+      <div className="tcGateActions">
+        <span className="successNote">
+          {hasCases ? "TC has been generated." : "No generated TC available."}
+        </span>
+        {viewing ? (
+          <button className="secondaryAction" onClick={onClose}>
+            Close
+          </button>
+        ) : (
+          <button className="primaryAction" onClick={onView} disabled={!hasCases}>
+            <Sparkles size={18} />
+            View Generated TC
+          </button>
+        )}
       </div>
-
-      <div className="panel rcaPanel">
-        <div className="panelTitle">
-          <Bot size={19} />
-          <h2>RCA Hypotheses</h2>
-        </div>
-        <div className="rcaList">
-          {output.rca_hypotheses.map((hypothesis) => (
-            <article className="rcaCard" key={hypothesis.title}>
-              <div className="rcaTop">
-                <h3>{hypothesis.title}</h3>
-                <div className="evidenceTags">
-                  <Tag>{hypothesis.confidence}</Tag>
-                  <ValidationBadge value={hypothesis.validation_level} />
-                </div>
-              </div>
-              <InfoList label="Evidence" items={hypothesis.evidence} />
-              <InfoList label="Likely files" items={hypothesis.likely_files} />
-              <InfoList label="Suggested checks" items={hypothesis.suggested_checks} />
-              {hypothesis.suggested_fix_area ? (
-                <p className="fixArea"><strong>Suggested fix area:</strong> {hypothesis.suggested_fix_area}</p>
-              ) : null}
-            </article>
-          ))}
-        </div>
-      </div>
-
-      {output.suggested_agent_project_yml ? (
-        <div className="panel manifestPanel">
-          <h2>Suggested agent.project.yml</h2>
-          <pre>{output.suggested_agent_project_yml}</pre>
-        </div>
-      ) : null}
     </section>
+  );
+}
+
+function TraceabilityPanels({
+  run,
+  output,
+  activeTab,
+  onTabChange
+}: {
+  run: AgentRun;
+  output: AgentRunOutput;
+  activeTab: DetailTab;
+  onTabChange: (tab: DetailTab) => void;
+}) {
+  const tabs: Array<{ id: DetailTab; label: string; count?: number }> = [
+    { id: "affected", label: "Affected Files", count: output.affected_files.length },
+    { id: "trace", label: "Trace Report" },
+    { id: "code", label: "Code Suggestions", count: output.code_change_suggestions?.length || 0 },
+    { id: "dependencies", label: "Dependencies", count: output.missing_dependencies.length },
+    { id: "rca", label: "RCA", count: output.rca_hypotheses.length }
+  ];
+
+  return (
+    <section className="panel detailTabsPanel">
+      <div className="panelTitle">
+        <FileSearch size={19} />
+        <h2>Implementation Details</h2>
+      </div>
+      <div className="detailTabs" role="tablist" aria-label="analysis details">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            className={activeTab === tab.id ? "detailTab active" : "detailTab"}
+            onClick={() => onTabChange(tab.id)}
+            type="button"
+          >
+            {tab.label}
+            {typeof tab.count === "number" ? <span>{tab.count}</span> : null}
+          </button>
+        ))}
+      </div>
+
+      <div className="detailTabPanel">
+        {activeTab === "affected" ? <AffectedFilesList files={output.affected_files} /> : null}
+        {activeTab === "trace" ? <AgentRunOverview run={run} output={output} /> : null}
+        {activeTab === "code" ? <CodeSuggestionList suggestions={output.code_change_suggestions || []} /> : null}
+        {activeTab === "dependencies" ? <DependencyList dependencies={output.missing_dependencies} /> : null}
+        {activeTab === "rca" ? <RcaList hypotheses={output.rca_hypotheses} /> : null}
+      </div>
+    </section>
+  );
+}
+
+function AffectedFilesList({ files }: { files: AffectedFile[] }) {
+  return (
+    <div className="evidenceList">
+      {files.length ? (
+        files.map((file) => (
+          <article className="evidenceCard" key={`${file.path}-${file.reason}`}>
+            <div>
+              <strong>{file.path}</strong>
+              <p>{file.reason}</p>
+            </div>
+            <div className="evidenceTags">
+              <Tag>{file.confidence}</Tag>
+              <Tag>{file.related_requirement || "requirement"}</Tag>
+            </div>
+          </article>
+        ))
+      ) : (
+        <EmptyState text="No code-supported affected files found." />
+      )}
+    </div>
+  );
+}
+
+function DependencyList({ dependencies }: { dependencies: MissingDependency[] }) {
+  return (
+    <div className="evidenceList">
+      {dependencies.length ? (
+        dependencies.map((dependency) => (
+          <article className="evidenceCard warning" key={dependency.name}>
+            <div>
+              <strong>{dependency.name}</strong>
+              <p>{dependency.reason}</p>
+              <small>{dependency.suggested_mock}</small>
+              {dependency.db_validation_query ? <code>{dependency.db_validation_query}</code> : null}
+            </div>
+          </article>
+        ))
+      ) : (
+        <EmptyState text="No missing dependency was detected from current context." />
+      )}
+    </div>
+  );
+}
+
+function RcaList({ hypotheses }: { hypotheses: RcaHypothesis[] }) {
+  return (
+    <div className="rcaList">
+      {hypotheses.map((hypothesis) => (
+        <article className="rcaCard" key={hypothesis.title}>
+          <div className="rcaTop">
+            <h3>{hypothesis.title}</h3>
+            <div className="evidenceTags">
+              <Tag>{hypothesis.confidence}</Tag>
+              <ValidationBadge value={hypothesis.validation_level} />
+            </div>
+          </div>
+          <InfoList label="Evidence" items={hypothesis.evidence} />
+          <InfoList label="Likely files" items={hypothesis.likely_files} />
+          <InfoList label="Suggested checks" items={hypothesis.suggested_checks} />
+          {hypothesis.suggested_fix_area ? (
+            <p className="fixArea"><strong>Suggested fix area:</strong> {hypothesis.suggested_fix_area}</p>
+          ) : null}
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function CodeSuggestionList({ suggestions }: { suggestions: CodeChangeSuggestion[] }) {
+  return (
+    <div className="codeSuggestionList">
+      {suggestions.length ? (
+        suggestions.map((suggestion) => (
+          <article className={suggestion.change_type === "blocked" ? "codeSuggestion blocked" : "codeSuggestion"} key={suggestion.title}>
+            <div className="rcaTop">
+              <div>
+                <h3>{suggestion.title}</h3>
+                <p>{suggestion.rationale}</p>
+              </div>
+              <div className="evidenceTags">
+                <Tag>{suggestion.change_type}</Tag>
+                <Tag>{suggestion.confidence}</Tag>
+                <ValidationBadge value={suggestion.validation_level} />
+              </div>
+            </div>
+            {suggestion.target_file || suggestion.target_symbol ? (
+              <div className="targetBox">
+                {suggestion.target_file ? <span><strong>File:</strong> {suggestion.target_file}</span> : null}
+                {suggestion.target_symbol ? <span><strong>Symbol:</strong> {suggestion.target_symbol}</span> : null}
+              </div>
+            ) : null}
+            {suggestion.blocker_reason ? (
+              <div className="blockerBox">
+                <strong>Blocked:</strong> {suggestion.blocker_reason}
+              </div>
+            ) : null}
+            <InfoList label="Implementation steps" items={suggestion.implementation_steps} />
+            <InfoList label="Safety notes" items={suggestion.safety_notes} />
+            <InfoList label="Tests to add" items={suggestion.tests_to_add} />
+            <InfoList label="Cross-repo/dependency notes" items={suggestion.dependencies} />
+            {suggestion.suggested_patch ? <pre className="suggestedPatch">{suggestion.suggested_patch}</pre> : null}
+          </article>
+        ))
+      ) : (
+        <EmptyState text="No code-change suggestion was generated for this run." />
+      )}
+    </div>
   );
 }
 
@@ -1068,7 +1215,7 @@ function AnalysisPanel({ analysis }: { analysis: Analysis }) {
     <section className="analysis">
       <div className="analysisHeader">
         <div>
-          <p className="eyebrow">BRD Analysis</p>
+          <p className="eyebrow">Requirement Analysis</p>
           <h2>Requirement Summary</h2>
           {analysisEngine ? (
             <p className="tcEngine">

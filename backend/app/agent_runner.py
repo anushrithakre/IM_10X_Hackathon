@@ -19,6 +19,7 @@ from .schemas import (
     AgentStep,
     AppSettings,
     BrdAnalyzeResponse,
+    CodeChangeSuggestion,
     ImpactMetrics,
     MissingDependency,
     RcaHypothesis,
@@ -40,6 +41,7 @@ class AgentRunExecutor:
     async def run(self, request: AgentRunRequest) -> AgentRun:
         started = datetime.now(timezone.utc)
         started_at = started.isoformat()
+        owner_key = self.store.project_owner_key(self.settings)
         run = AgentRun(
             run_id=f"run-{uuid.uuid4().hex[:10]}",
             ticket_id=request.ticket_id,
@@ -49,7 +51,7 @@ class AgentRunExecutor:
             llm_model=self.settings.llm_model,
             started_at=started_at,
         )
-        self.store.save_agent_run(run)
+        self.store.save_agent_run(run, owner_key)
         steps: list[AgentStep] = []
 
         def mark(step: str, message: str = "") -> None:
@@ -75,7 +77,8 @@ class AgentRunExecutor:
             run.brd_source = brd_reference
             mark("fetch_brd_source", brd_status)
 
-            repo_context = await scm_client.fetch_repository_context(request.repo_id, request.branch)
+            search_terms = self._search_terms(brd_text + "\n" + ticket_context)
+            repo_context = await scm_client.fetch_repository_context(request.repo_id, request.branch, search_terms)
             manifest = await scm_client.fetch_agent_project_manifest(request.repo_id, request.branch)
             files_used = self._files_from_context(repo_context)
             run.files_used = files_used
@@ -117,11 +120,14 @@ class AgentRunExecutor:
                 files_used=files_used,
                 manifest=manifest,
             )
-            mark("generate_rca_and_traceability", "Generated affected files, dependency gaps, and RCA hypotheses.")
+            mark("generate_rca_and_traceability", "Generated affected files, dependency gaps, RCA hypotheses, and code suggestions.")
 
             affected_files = self._affected_files(insights, files_used, analysis)
             missing_dependencies = self._missing_dependencies(insights, repo_context, analysis)
             rca_hypotheses = self._rca_hypotheses(insights, affected_files, analysis)
+            code_change_suggestions = self._code_change_suggestions(
+                insights, affected_files, missing_dependencies, repo_context, analysis
+            )
             test_cases = self._enrich_test_cases(
                 tc_response.test_cases,
                 analysis,
@@ -139,6 +145,7 @@ class AgentRunExecutor:
                 affected_files=affected_files,
                 missing_dependencies=missing_dependencies,
                 rca_hypotheses=rca_hypotheses,
+                code_change_suggestions=code_change_suggestions,
                 impact_metrics=metrics,
                 suggested_agent_project_yml=self._suggest_manifest(
                     repo_name=request.repo_name or request.repo_id or "selected-repo",
@@ -151,14 +158,14 @@ class AgentRunExecutor:
             run.status = "completed"
             run.completed_at = datetime.now(timezone.utc).isoformat()
             run.output_json = output
-            self.store.save_agent_run(run)
+            self.store.save_agent_run(run, owner_key)
             return run
         except Exception as exc:
             steps.append(AgentStep(step="agent_run", status="failed", message=str(exc)))
             run.status = "failed"
             run.completed_at = datetime.now(timezone.utc).isoformat()
             run.error = str(exc)
-            self.store.save_agent_run(run)
+            self.store.save_agent_run(run, owner_key)
             return run
 
     async def _fetch_brd(
@@ -199,15 +206,41 @@ class AgentRunExecutor:
         if not self.settings.llm_api_key or not self.settings.llm_model or self.settings.llm_provider == "none":
             return {}
         prompt = f"""
-Return valid JSON only for a TraceFix read-only QA/RCA report.
+Return valid JSON only for a TraceFix read-only senior engineering report.
 
 Keys:
 affected_files: array of {{path, reason, confidence, related_requirement}}
 missing_dependencies: array of {{name, reason, suggested_mock, db_validation_query}}
 rca_hypotheses: array of {{title, confidence, evidence, likely_files, suggested_checks, suggested_fix_area}}
+code_change_suggestions: array of {{
+  title,
+  change_type: "modify" | "create" | "db" | "config" | "cross_repo" | "blocked",
+  target_file,
+  target_symbol,
+  rationale,
+  implementation_steps,
+  suggested_patch,
+  safety_notes,
+  tests_to_add,
+  dependencies,
+  confidence,
+  blocker_reason,
+  validation_level
+}}
 
 Use only the given BRD/ticket/repo context. Confidence must be high, medium, or low.
+For affected_files and code_change_suggestions.target_file, choose paths ONLY from the Files used list.
+If the exact file is not present in Files used, do not invent one. Return a blocked code_change_suggestion explaining what extra repo/module/context is needed.
 RCA hypotheses are requirement/code-supported hypotheses, not production-validated facts.
+For code_change_suggestions:
+- Behave like a senior full-stack/backend/frontend/database engineer.
+- Identify exactly which existing file and symbol should change when evidence exists.
+- Suggest creating a new file only when the requirement cannot fit an existing file cleanly.
+- If another repository/service owns the change, use change_type "cross_repo" and name the dependency.
+- If the repo context is insufficient, use change_type "blocked" and explain blocker_reason.
+- Do not invent exact code APIs that are not visible in context; provide safe pseudocode or targeted steps instead.
+- Include regression safety notes and tests required to avoid breaking existing behavior.
+- Keep suggested_patch concise; use a minimal illustrative diff only when the target code is clear.
 
 Requirement summary:
 {json.dumps(analysis.summary, ensure_ascii=False)}
@@ -259,11 +292,44 @@ Repository context:
     def _files_from_context(self, repo_context: str) -> list[str]:
         paths = []
         for line in repo_context.splitlines():
-            if line.startswith("- "):
-                paths.append(line[2:].strip())
-            elif line.startswith("FILE: "):
+            if line.startswith("FILE: "):
                 paths.append(line.split("FILE: ", 1)[1].strip())
         return list(dict.fromkeys(path for path in paths if path))[:25]
+
+    def _search_terms(self, text: str) -> list[str]:
+        preferred = []
+        lowered = text.lower()
+        domain_terms = [
+            "whatsapp",
+            "template",
+            "notification",
+            "message",
+            "media",
+            "image",
+            "nach",
+            "lotuspay",
+            "razorpay",
+            "ingenico",
+            "receipt",
+            "gateway",
+            "payment",
+            "mandate",
+            "pan",
+            "cashback",
+            "invoice",
+        ]
+        for term in domain_terms:
+            if term in lowered:
+                preferred.append(term)
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_]{3,}", text)
+        stop = {"currently", "should", "would", "requirement", "business", "expected", "behavior", "description", "comments"}
+        for word in words:
+            clean = word.lower()
+            if clean not in stop and clean not in preferred:
+                preferred.append(clean)
+            if len(preferred) >= 12:
+                break
+        return preferred[:12]
 
     def _affected_files(
         self,
@@ -272,10 +338,14 @@ Repository context:
         analysis: BrdAnalyzeResponse,
     ) -> list[AffectedFile]:
         items = []
+        allowed_paths = set(files_used)
         for item in insights.get("affected_files", []) if isinstance(insights, dict) else []:
             if isinstance(item, dict) and item.get("path"):
+                path = str(item.get("path"))
+                if path not in allowed_paths:
+                    continue
                 items.append(AffectedFile(**{
-                    "path": str(item.get("path")),
+                    "path": path,
                     "reason": str(item.get("reason") or "Relevant to selected requirement/code flow."),
                     "confidence": item.get("confidence") if item.get("confidence") in {"high", "medium", "low"} else "medium",
                     "related_requirement": str(item.get("related_requirement") or analysis.requirements[0].id if analysis.requirements else ""),
@@ -364,6 +434,98 @@ Repository context:
                 ],
                 suggested_fix_area="Review affected modules before implementation.",
                 validation_level=VALIDATION_L2 if affected_files else VALIDATION_L1,
+            )
+        ]
+
+    def _code_change_suggestions(
+        self,
+        insights: dict[str, Any],
+        affected_files: list[AffectedFile],
+        missing_dependencies: list[MissingDependency],
+        repo_context: str,
+        analysis: BrdAnalyzeResponse,
+    ) -> list[CodeChangeSuggestion]:
+        suggestions = []
+        valid_types = {"modify", "create", "db", "config", "cross_repo", "blocked"}
+        allowed_paths = {item.path for item in affected_files}
+        for item in insights.get("code_change_suggestions", []) if isinstance(insights, dict) else []:
+            if not isinstance(item, dict) or not item.get("title"):
+                continue
+            change_type = item.get("change_type") if item.get("change_type") in valid_types else "modify"
+            target_file = str(item.get("target_file") or "")
+            if target_file and target_file not in allowed_paths:
+                change_type = "blocked"
+                blocker_reason = (
+                    f"Model suggested '{target_file}', but that file was not present in the fetched repository context. "
+                    "Re-run with a more specific repo/module or add agent.project.yml entrypoints."
+                )
+                target_file = ""
+            else:
+                blocker_reason = str(item.get("blocker_reason") or "")
+            confidence = item.get("confidence") if item.get("confidence") in {"high", "medium", "low"} else "medium"
+            suggestions.append(
+                CodeChangeSuggestion(
+                    title=str(item.get("title")),
+                    change_type=change_type,
+                    target_file=target_file,
+                    target_symbol=str(item.get("target_symbol") or ""),
+                    rationale=str(item.get("rationale") or "Suggested from requirement and selected repository context."),
+                    implementation_steps=self._as_list(item.get("implementation_steps")),
+                    suggested_patch=str(item.get("suggested_patch") or ""),
+                    safety_notes=self._as_list(item.get("safety_notes")),
+                    tests_to_add=self._as_list(item.get("tests_to_add")),
+                    dependencies=self._as_list(item.get("dependencies")),
+                    confidence=confidence,
+                    blocker_reason=blocker_reason,
+                    validation_level=str(
+                        item.get("validation_level")
+                        or (VALIDATION_L2 if repo_context and change_type != "blocked" else VALIDATION_L1)
+                    ),
+                )
+            )
+        if suggestions:
+            return suggestions[:8]
+
+        if not repo_context:
+            return [
+                CodeChangeSuggestion(
+                    title="Code change suggestion blocked by missing repository context",
+                    change_type="blocked",
+                    rationale="TraceFix could not inspect selected repository files, so file-level changes would be unsafe.",
+                    implementation_steps=[
+                        "Select a repository and branch with readable source files.",
+                        "Re-run TraceFix analysis to map the requirement to concrete files and symbols.",
+                    ],
+                    safety_notes=["Do not implement code changes without repository evidence."],
+                    dependencies=[dependency.name for dependency in missing_dependencies],
+                    confidence="high",
+                    blocker_reason="Repository context unavailable.",
+                    validation_level=VALIDATION_L1,
+                )
+            ]
+
+        primary_file = affected_files[0].path if affected_files else ""
+        return [
+            CodeChangeSuggestion(
+                title="Review and update the primary affected implementation path",
+                change_type="modify" if primary_file else "blocked",
+                target_file=primary_file,
+                rationale="The requirement changes expected behavior and this file was selected as the highest-confidence code context.",
+                implementation_steps=[
+                    "Confirm the existing branch logic that implements the current behavior.",
+                    "Add the new requirement behavior behind the same validation and error-handling conventions.",
+                    "Preserve existing behavior for legacy/negative paths.",
+                    "Add regression tests for unchanged existing behavior and new requirement edge cases.",
+                ],
+                safety_notes=[
+                    "Avoid changing shared contracts unless all callers are reviewed.",
+                    "Keep fallback behavior explicit for missing downstream dependencies.",
+                ],
+                tests_to_add=[requirement.title for requirement in analysis.requirements[:3]],
+                dependencies=[dependency.name for dependency in missing_dependencies],
+                confidence="medium",
+                blocker_reason="" if primary_file else "No affected file could be identified from repository context.",
+                validation_level=VALIDATION_L2 if primary_file else VALIDATION_L1,
             )
         ]
 

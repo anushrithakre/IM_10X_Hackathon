@@ -207,6 +207,84 @@ h3 {
   gap: 18px;
 }
 
+.workbenchWithHistory {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 18px;
+  align-items: start;
+}
+
+.workbenchMain {
+  min-width: 0;
+}
+
+.ticketHistorySidebar {
+  position: sticky;
+  top: 20px;
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 18px;
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+}
+
+.ticketHistoryHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ticketHistoryHeader h2 {
+  font-size: 19px;
+}
+
+.historyNote {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: -4px 0 0;
+}
+
+.ticketHistoryList {
+  display: grid;
+  gap: 10px;
+}
+
+.ticketHistoryItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
+  color: var(--ink);
+  padding: 12px;
+  text-align: left;
+}
+
+.ticketHistoryItem.selected {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.ticketHistoryItem strong,
+.ticketHistoryItem small {
+  display: block;
+}
+
+.ticketHistoryItem small {
+  color: var(--muted);
+  line-height: 1.35;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
 .settingsGrid {
   grid-template-columns: minmax(0, 1fr) 320px;
   align-items: flex-start;
@@ -339,6 +417,8 @@ h3 {
 .detailPanel,
 .analysis,
 .agentOverview,
+.tcGatePanel,
+.traceabilityStack,
 .traceabilityGrid,
 .runHistoryPanel,
 .tcPanel {
@@ -563,6 +643,35 @@ h3 {
   background: var(--surface);
   box-shadow: var(--shadow);
   padding: 22px;
+}
+
+.tcGatePanel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.tcGatePanel .docStatus {
+  margin-bottom: 0;
+}
+
+.tcGateActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.successNote {
+  border: 1px solid #b7e4cf;
+  border-radius: 999px;
+  background: #f0fdf4;
+  color: #166534;
+  padding: 8px 11px;
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .agentOverview {
@@ -853,6 +962,64 @@ h3 {
   gap: 18px;
 }
 
+.traceabilityStack {
+  display: grid;
+  gap: 18px;
+}
+
+.traceabilityStack .agentOverview {
+  margin-top: 0;
+}
+
+.detailTabsPanel {
+  box-shadow: var(--shadow);
+  margin-top: 18px;
+}
+
+.detailTabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+}
+
+.detailTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  color: #344054;
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.detailTab.active {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.detailTab span {
+  display: inline-grid;
+  min-width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #344054;
+  font-size: 12px;
+}
+
+.detailTabPanel {
+  min-width: 0;
+}
+
 .evidencePanel,
 .rcaPanel,
 .manifestPanel {
@@ -914,6 +1081,65 @@ h3 {
 .rcaCard {
   display: grid;
   gap: 12px;
+}
+
+.codeSuggestionList {
+  display: grid;
+  gap: 12px;
+}
+
+.codeSuggestion {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--green);
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 14px;
+}
+
+.codeSuggestion.blocked {
+  border-left-color: var(--amber);
+  background: #fff7ed;
+}
+
+.codeSuggestion h3 {
+  margin-bottom: 6px;
+}
+
+.codeSuggestion p {
+  color: var(--muted);
+  line-height: 1.45;
+  margin: 0;
+}
+
+.targetBox,
+.blockerBox {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #344054;
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+
+.blockerBox {
+  border-color: #ffd79b;
+  background: #fff7ed;
+  color: var(--amber);
+}
+
+.suggestedPatch {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e5e7eb;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
 }
 
 .manifestPanel {
@@ -1201,6 +1427,7 @@ h3 {
 
 @media (max-width: 980px) {
   .shell,
+  .workbenchWithHistory,
   .workbenchGrid,
   .settingsGrid,
   .analysisGrid,
@@ -1228,6 +1455,11 @@ h3 {
 
   .railStatus {
     display: none;
+  }
+
+  .ticketHistorySidebar {
+    position: static;
+    max-height: none;
   }
 }
 

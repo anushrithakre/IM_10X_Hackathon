@@ -172,6 +172,22 @@ class RcaHypothesis(BaseModel):
     validation_level: str = "L2 Code-supported"
 
 
+class CodeChangeSuggestion(BaseModel):
+    title: str
+    change_type: Literal["modify", "create", "db", "config", "cross_repo", "blocked"] = "modify"
+    target_file: str = ""
+    target_symbol: str = ""
+    rationale: str
+    implementation_steps: list[str] = Field(default_factory=list)
+    suggested_patch: str = ""
+    safety_notes: list[str] = Field(default_factory=list)
+    tests_to_add: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "medium"
+    blocker_reason: str = ""
+    validation_level: str = "L2 Code-supported"
+
+
 class ImpactMetrics(BaseModel):
     manual_analysis_estimate_minutes: int = 25
     tracefix_analysis_seconds: float = 0
@@ -202,6 +218,7 @@ class AgentRunOutput(BaseModel):
     affected_files: list[AffectedFile] = Field(default_factory=list)
     missing_dependencies: list[MissingDependency] = Field(default_factory=list)
     rca_hypotheses: list[RcaHypothesis] = Field(default_factory=list)
+    code_change_suggestions: list[CodeChangeSuggestion] = Field(default_factory=list)
     impact_metrics: ImpactMetrics = Field(default_factory=ImpactMetrics)
     suggested_agent_project_yml: str = ""
     steps: list[AgentStep] = Field(default_factory=list)

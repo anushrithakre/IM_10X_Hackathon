@@ -52,10 +52,20 @@ class SettingsStore:
                 """
                 CREATE TABLE IF NOT EXISTS agent_runs (
                     id TEXT PRIMARY KEY,
+                    owner_key TEXT NOT NULL DEFAULT '',
                     payload TEXT NOT NULL,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """
+            )
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(agent_runs)").fetchall()
+            }
+            if "owner_key" not in columns:
+                conn.execute("ALTER TABLE agent_runs ADD COLUMN owner_key TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_agent_runs_owner_created ON agent_runs(owner_key, created_at DESC)"
             )
             conn.execute(
                 """
@@ -152,34 +162,48 @@ class SettingsStore:
             mock_fallback_enabled=self.mock_fallback_enabled,
         )
 
-    def save_agent_run(self, run: AgentRun) -> None:
+    def project_owner_key(self, settings: AppSettings | None = None) -> str:
+        settings = settings or self.load()
+        token = settings.project_token or ""
+        if not token:
+            return "no-project-token"
+        digest = hashlib.sha256((self.secret + ":" + token).encode("utf-8")).hexdigest()
+        return digest
+
+    def save_agent_run(self, run: AgentRun, owner_key: str | None = None) -> None:
+        owner_key = owner_key or self.project_owner_key()
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO agent_runs (id, payload)
-                VALUES (?, ?)
-                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
+                INSERT INTO agent_runs (id, owner_key, payload)
+                VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    owner_key = excluded.owner_key,
+                    payload = excluded.payload
                 """,
-                (run.run_id, run.model_dump_json()),
+                (run.run_id, owner_key, run.model_dump_json()),
             )
 
     def list_agent_runs(self, limit: int = 20) -> list[AgentRun]:
+        owner_key = self.project_owner_key()
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT payload FROM agent_runs
+                WHERE owner_key = ?
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (owner_key, limit),
             ).fetchall()
         return [AgentRun.model_validate_json(row[0]) for row in rows]
 
     def get_agent_run(self, run_id: str) -> AgentRun | None:
+        owner_key = self.project_owner_key()
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT payload FROM agent_runs WHERE id = ?",
-                (run_id,),
+                "SELECT payload FROM agent_runs WHERE id = ? AND owner_key = ?",
+                (run_id, owner_key),
             ).fetchone()
         return AgentRun.model_validate_json(row[0]) if row else None
 

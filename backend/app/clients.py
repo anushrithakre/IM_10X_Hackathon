@@ -449,11 +449,16 @@ class ScmClient:
             branches = [branch for branch in branches if query.lower() in branch.name.lower()]
         return branches
 
-    async def fetch_repository_context(self, repo_id: str | None, branch: str | None) -> str:
+    async def fetch_repository_context(
+        self,
+        repo_id: str | None,
+        branch: str | None,
+        search_terms: list[str] | None = None,
+    ) -> str:
         if not repo_id or not branch or not (self.settings.scm_base_url and self.settings.scm_token):
             return ""
         try:
-            return await self._fetch_live_repository_context(repo_id, branch)
+            return await self._fetch_live_repository_context(repo_id, branch, search_terms or [])
         except Exception:
             if not self.allow_mock:
                 raise
@@ -529,7 +534,7 @@ class ScmClient:
             if item.get("name")
         ]
 
-    async def _fetch_live_repository_context(self, repo_id: str, branch: str) -> str:
+    async def _fetch_live_repository_context(self, repo_id: str, branch: str, search_terms: list[str]) -> str:
         tree_url = self._url(f"/api/v4/projects/{quote(repo_id, safe='')}/repository/tree")
         params = {"recursive": "true", "per_page": "100", "ref": branch}
         async with httpx.AsyncClient(timeout=20) as client:
@@ -551,10 +556,10 @@ class ScmClient:
                 if not next_page:
                     break
                 page = int(next_page)
-            selected = self._select_context_files(files)
-            search_hits = await self._search_repository_blobs(client, repo_id, branch)
+            selected = self._select_context_files(files, search_terms)
+            search_hits = await self._search_repository_blobs(client, repo_id, branch, search_terms)
             for path in search_hits:
-                if path not in selected:
+                if self._is_context_file(path) and path not in selected:
                     selected.insert(0, path)
             snippets = []
             for path in selected[:12]:
@@ -584,9 +589,12 @@ class ScmClient:
         client: httpx.AsyncClient,
         repo_id: str,
         branch: str,
+        search_terms: list[str] | None = None,
     ) -> list[str]:
         paths: list[str] = []
-        for query in ("whatsapp", "template", "message", "notification", "sms", "media", "image"):
+        default_terms = ["whatsapp", "template", "message", "notification", "sms", "media", "image"]
+        queries = list(dict.fromkeys([*(search_terms or []), *default_terms]))[:18]
+        for query in queries:
             url = self._url(f"/api/v4/projects/{quote(repo_id, safe='')}/search")
             response = await client.get(
                 url,
@@ -597,13 +605,11 @@ class ScmClient:
                 continue
             for item in response.json():
                 path = item.get("path") or item.get("filename") or ""
-                if path and path not in paths:
+                if path and self._is_context_file(path) and path not in paths:
                     paths.append(path)
         return paths
 
-    def _select_context_files(self, files: list[str]) -> list[str]:
-        allowed = (".py", ".js", ".ts", ".tsx", ".java", ".go", ".php", ".rb", ".cs", ".yml", ".yaml", ".json")
-        ignored = ("/node_modules/", "/vendor/", "/dist/", "/build/", "/.next/", "/target/")
+    def _select_context_files(self, files: list[str], search_terms: list[str] | None = None) -> list[str]:
         keywords = (
             "whatsapp",
             "template",
@@ -616,16 +622,36 @@ class ScmClient:
             "controller",
             "service",
             "route",
+            *(search_terms or []),
         )
         candidates = []
         for path in files:
-            lowered = f"/{path.lower()}"
-            if not lowered.endswith(allowed) or any(part in lowered for part in ignored):
+            if not self._is_context_file(path):
                 continue
+            lowered = f"/{path.lower()}"
             score = sum(1 for keyword in keywords if keyword in lowered)
             if score:
                 candidates.append((score, path))
         return [path for _, path in sorted(candidates, key=lambda item: (-item[0], len(item[1])))]
+
+    def _is_context_file(self, path: str) -> bool:
+        allowed = (".py", ".js", ".ts", ".tsx", ".java", ".go", ".php", ".rb", ".cs", ".vb", ".aspx", ".yml", ".yaml", ".json")
+        ignored = (
+            "/node_modules/",
+            "/vendor/",
+            "/dist/",
+            "/build/",
+            "/.next/",
+            "/target/",
+            "/packages/",
+            "/bin/",
+            "/obj/",
+            ".min.js",
+            ".xml",
+            ".lock",
+        )
+        lowered = f"/{path.lower()}"
+        return lowered.endswith(allowed) and not any(part in lowered for part in ignored)
 
     def _mock_repos(self, query: str) -> list[Repository]:
         if not query:
