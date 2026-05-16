@@ -20,7 +20,15 @@ pip install -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
+## Run Backend for Windows
 
+```bash
+& "C:\Program Files\Python312\python.exe" -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --reload --port 8000
+```
 ## Run Frontend
 
 ```bash
