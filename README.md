@@ -1,4 +1,4 @@
-# TraceFix AI
+# Intelligent QA + RCA Agent
 
 Milestone 1 implementation for the Intelligent QA + RCA agent:
 
